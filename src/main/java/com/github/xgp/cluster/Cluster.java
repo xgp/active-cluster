@@ -40,7 +40,7 @@ public interface Cluster extends Service {
    *
    * @return a Map containing all the nodes in the cluster, where key=node destination,value=node
    */
-  public Map getNodes();
+  public Map<Destination, Node> getNodes();
 
   /**
    * Adds a new listener to cluster events

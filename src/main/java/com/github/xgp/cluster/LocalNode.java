@@ -30,5 +30,5 @@ public interface LocalNode extends Node {
    * @param state
    * @throws ClusterException
    */
-  public void setState(Map state) throws ClusterException;
+  public void setState(Map<String, Object> state) throws ClusterException;
 }

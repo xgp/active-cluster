@@ -4,14 +4,14 @@ ActiveCluster is a framework for writing cluster-based applications, monitoring 
 
 ## Features
 
-The current features include
+The current features include:
 
-- viewing the current nodes in the cluster and their current state
-- listening to nodes arrive, update their state, shut down or fail
-- communicate with the cluster as a whole or with any specific node in the cluster
-- elect a leader of the cluster to make decisions on behalf of the cluster or to run singleton jobs
+- Viewing the current nodes in the cluster and their current state
+- Listening to nodes arrive, update their state, shut down or fail
+- Communicating with the cluster as a whole or with any specific node in the cluster
+- Electing a leader of the cluster to make decisions on behalf of the cluster or to run singleton jobs
 
-## Implementation
+## Details
 
 It should be easy to implement the ActiveCluster API on top of any networking library such as raw sockets, JMS, JGroups or Jabber. The default implementation uses JGroups.
 
@@ -21,18 +21,97 @@ Clusters communicate across a common destination but every member (node) of a cl
 
 ### Groups
 
-Contains Group Organsisation models and policies for arranging Node instances into groups, such as buddy-groups (failover nodes) or master/slave groups for High Availability (HA) protocols. 
+Contains Group Organization models and policies for arranging Node instances into groups, such as buddy-groups (failover nodes) or master/slave groups for High Availability (HA) protocols.
 
+### JGroups Implementation
 
-# Use cases
+The JGroups implementation creates a named cluster by accepting a standard JGroups XML configuration file that indicates a mechanism for node discovery (e.g. TCPPING, JDBC_PING) and communication (e.g. TCP or UDP).
 
-ActiveCluster can be used to build a variety of different network protocols like...
+To use the JGroups implementation:
 
-- buddy-groups for session replication
-- master / slave protocols for High Availability (HA) protocols with hot-standby
-- controller-voting protocols to elect a single node in a cluster to be the controller along with defining who will be the next node if the controller falls over as well as detecting the loss of the controller
-distributed lock manager
+```java
+// Create a JGroups cluster factory
+JGroupsClusterFactory factory = new JGroupsClusterFactory();
 
+// Or specify a custom JGroups configuration file
+// JGroupsClusterFactory factory = new JGroupsClusterFactory("custom-jgroups.xml");
 
+// Create the cluster with a node name and cluster name
+Cluster cluster = factory.createCluster("node1", "my-cluster");
+
+// Start the cluster
+cluster.start();
+
+// Get the local node and set its state
+Map<String, Object> state = new HashMap<>();
+state.put("status", "ONLINE");
+state.put("startTime", System.currentTimeMillis());
+cluster.getLocalNode().setState(state);
+
+// Send a message to the entire cluster
+Message message = new JGroupsMessage("Hello Cluster!");
+cluster.send(cluster.getDestination(), message);
+
+// Create a consumer to receive messages from the cluster
+MessageConsumer consumer = cluster.createConsumer(cluster.getDestination());
+consumer.setMessageListener(message -> {
+    System.out.println("Received: " + message.getBody(String.class));
+});
+
+// Add a listener for cluster events
+cluster.addClusterListener(new ClusterListener() {
+    public void onNodeAdd(ClusterEvent event) {
+        System.out.println("Node added: " + event.getNode().getName());
+    }
+    
+    // Implement other listener methods...
+});
+
+// When finished, stop the cluster
+cluster.stop();
+```
+
+See the `JGroupsClusterExample` class for a complete example.
+
+## Use Cases
+
+ActiveCluster can be used to build a variety of different network protocols like:
+
+- Buddy-groups for session replication
+- Master/slave protocols for High Availability (HA) protocols with hot-standby
+- Controller-voting protocols to elect a single node in a cluster to be the controller
+- Distributed lock manager
+- Work distribution across a cluster
+- Cluster-wide configuration and state management
+
+## Building and Running
+
+To build the project:
+
+```bash
+mvn clean install
+```
+
+To run the example application:
+
+```bash
+# Basic execution with default configuration 
+mvn exec:java -Dexec.args="node1"
+
+# With specific node name and configuration file
+mvn exec:java -Dexec.args="node1 udp.xml"
+```
+
+The JGroups implementation includes several configuration options:
+- `minimal.xml` - Absolute minimal configuration with no custom parameters (default)
+- `simple-udp.xml` - Basic UDP configuration with some optimized settings
+- `udp.xml` - Enhanced UDP multicast for discovery (works well in local development)
+- `tcp.xml` - Uses TCP with static configuration (better for production)
+
+For maximum compatibility, use the minimal.xml configuration:
+
+```bash
+mvn exec:java -Dexec.args="node1 minimal.xml"
+```
 
 

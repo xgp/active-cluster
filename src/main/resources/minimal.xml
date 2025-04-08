@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  Minimal configuration with no custom parameters.
+  Should work with any JGroups version.
+-->
+<config xmlns="urn:org:jgroups"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="urn:org:jgroups http://www.jgroups.org/schema/jgroups.xsd">
+  <UDP />
+  <PING />
+  <MERGE3 />
+  <FD_SOCK/>
+  <FD_ALL/>
+  <VERIFY_SUSPECT/>
+  <pbcast.NAKACK2 />
+  <UNICAST3 />
+  <pbcast.STABLE />
+  <pbcast.GMS />
+  <UFC/>
+  <MFC/>
+  <FRAG2/>
+  <pbcast.STATE_TRANSFER/>
+</config>

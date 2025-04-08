@@ -33,7 +33,7 @@ public interface Node {
   /**
    * @return an immutable map of the nodes state
    */
-  public Map getState();
+  public Map<String, Object> getState();
 
   /**
    * @return the name of the node

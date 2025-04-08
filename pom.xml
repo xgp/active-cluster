@@ -108,6 +108,14 @@
         <artifactId>fmt-maven-plugin</artifactId>
         <version>2.25</version>
       </plugin>
+      <plugin> <!-- run the example application using `mvn exec:java` -->
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.1.0</version>
+        <configuration>
+          <mainClass>com.github.xgp.cluster.examples.JGroupsClusterExample</mainClass>
+        </configuration>
+      </plugin>
     </plugins>
   </build>
 
@@ -117,6 +125,11 @@
       <artifactId>junit</artifactId>
       <version>${junit-version}</version>
       <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.jgroups</groupId>
+      <artifactId>jgroups</artifactId>
+      <version>5.3.4.Final</version>
     </dependency>
   </dependencies>
 
