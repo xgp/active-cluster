@@ -2,6 +2,10 @@
 
 ActiveCluster is a framework for writing cluster-based applications, monitoring the available nodes in a cluster and communicating with them. ActiveCluster consists of an API together with a default implementation.
 
+## History
+
+This is based on a long dead project of the same name by Codehaus. It was somewhat JMS-specific, but I liked the API, and had a working implementation ~20 years ago. I'm trying to bring this back from the bit rot, having not done anything with JGroups for that long. I'm also using it as a test to see if the language models (e.g. Claude Code) are any good at writing the implementation bits for a concise interface.
+
 ## Features
 
 The current features include:
