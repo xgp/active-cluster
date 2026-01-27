@@ -1,18 +1,4 @@
-/**
- * Licensed to the Apache Software Foundation (ASF) under one or more contributor license
- * agreements. See the NOTICE file distributed with this work for additional information regarding
- * copyright ownership. The ASF licenses this file to You under the Apache License, Version 2.0 (the
- * "License"); you may not use this file except in compliance with the License. You may obtain a
- * copy of the License at
- *
- * <p>http://www.apache.org/licenses/LICENSE-2.0
- *
- * <p>Unless required by applicable law or agreed to in writing, software distributed under the
- * License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either
- * express or implied. See the License for the specific language governing permissions and
- * limitations under the License.
- */
-package com.github.xgp.cluster.impl.jgroups;
+package com.github.xgp.cluster.jgroups;
 
 import com.github.xgp.cluster.ClusterException;
 import com.github.xgp.cluster.Destination;
@@ -28,72 +14,72 @@ import org.jgroups.Address;
 
 /**
  * JGroups implementation of the Node interface.
- * 
+ *
  * @version $Revision: 1.0 $
  */
 public class JGroupsNode implements Node, Externalizable {
-  
+
   private static final long serialVersionUID = -3697243211359033124L;
-  
+
   private String name;
   private JGroupsDestination destination;
   private Map<String, Object> state = new HashMap<>();
   private Object zone;
   private boolean coordinator;
-  
+
   // Required for Externalizable
   public JGroupsNode() {}
-  
+
   public JGroupsNode(String name) {
     this.name = name;
     this.destination = new JGroupsDestination(name);
   }
-  
+
   public JGroupsNode(String name, Address address) {
     this.name = name;
     this.destination = new JGroupsDestination(name, address);
   }
-  
+
   @Override
   public Destination getDestination() {
     return destination;
   }
-  
+
   @Override
   public Map<String, Object> getState() {
     return Collections.unmodifiableMap(state);
   }
-  
+
   public void setState(Map<String, Object> state) throws ClusterException {
     this.state.clear();
     if (state != null) {
       this.state.putAll(state);
     }
   }
-  
+
   @Override
   public String getName() {
     return name;
   }
-  
+
   @Override
   public boolean isCoordinator() {
     return coordinator;
   }
-  
+
   public void setCoordinator(boolean coordinator) {
     this.coordinator = coordinator;
   }
-  
+
   @Override
   public Object getZone() {
     return zone;
   }
-  
+
   public void setZone(Object zone) {
     this.zone = zone;
   }
-  
+
   @Override
   public void writeExternal(ObjectOutput out) throws IOException {
     out.writeUTF(name);
@@ -102,7 +88,7 @@ public class JGroupsNode implements Node, Externalizable {
     out.writeObject(zone);
     out.writeBoolean(coordinator);
   }
-  
+
   @SuppressWarnings("unchecked")
   @Override
   public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
@@ -112,21 +98,21 @@ public class JGroupsNode implements Node, Externalizable {
     zone = in.readObject();
     coordinator = in.readBoolean();
   }
-  
+
   @Override
   public boolean equals(Object o) {
     if (this == o) return true;
     if (o == null || getClass() != o.getClass()) return false;
-    
+
     JGroupsNode that = (JGroupsNode) o;
     return name.equals(that.name);
   }
-  
+
   @Override
   public int hashCode() {
     return name.hashCode();
   }
-  
+
   @Override
   public String toString() {
     return "JGroupsNode[name=" + name + ", coordinator=" + coordinator + "]";

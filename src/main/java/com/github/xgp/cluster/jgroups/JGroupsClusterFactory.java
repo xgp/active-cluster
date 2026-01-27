@@ -12,7 +12,7 @@
  * express or implied. See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package com.github.xgp.cluster.impl.jgroups;
+package com.github.xgp.cluster.jgroups;
 
 import com.github.xgp.cluster.Cluster;
 import com.github.xgp.cluster.ClusterException;
@@ -23,7 +23,7 @@ import java.util.UUID;
 
 /**
  * JGroups implementation of the ClusterFactory interface.
- * 
+ *
  * @version $Revision: 1.0 $
  */
 public class JGroupsClusterFactory implements ClusterFactory {
@@ -31,16 +31,14 @@ public class JGroupsClusterFactory implements ClusterFactory {
   private String jgroupsConfig;
   private JGroupsDestinationMarshaller marshaller;
 
-  /**
-   * Create a new factory with default configuration.
-   */
+  /** Create a new factory with default configuration. */
   public JGroupsClusterFactory() {
     this(null, null);
   }
 
   /**
    * Create a new factory with the given JGroups configuration file.
-   * 
+   *
    * @param jgroupsConfig path to JGroups XML configuration file
    */
   public JGroupsClusterFactory(String jgroupsConfig) {
@@ -49,7 +47,7 @@ public class JGroupsClusterFactory implements ClusterFactory {
 
   /**
    * Create a new factory with the given JGroups configuration and marshaller.
-   * 
+   *
    * @param jgroupsConfig path to JGroups XML configuration file
    * @param marshaller custom destination marshaller or null for default
    */
@@ -60,23 +58,23 @@ public class JGroupsClusterFactory implements ClusterFactory {
 
   @Override
   public Cluster createCluster(String localName, String destinationName) throws ClusterException {
-    JGroupsCluster cluster = new JGroupsCluster(localName, destinationName, jgroupsConfig, marshaller);
+    JGroupsCluster cluster =
+        new JGroupsCluster(localName, destinationName, jgroupsConfig, marshaller);
     return cluster;
   }
 
   @Override
-  public Cluster createCluster(String localName, String destinationName, DestinationMarshaller marshaller)
+  public Cluster createCluster(
+      String localName, String destinationName, DestinationMarshaller marshaller)
       throws ClusterException {
     if (!(marshaller instanceof JGroupsDestinationMarshaller)) {
       throw new ClusterException();
     }
-    
-    JGroupsCluster cluster = new JGroupsCluster(
-        localName,
-        destinationName,
-        jgroupsConfig,
-        (JGroupsDestinationMarshaller) marshaller);
-    
+
+    JGroupsCluster cluster =
+        new JGroupsCluster(
+            localName, destinationName, jgroupsConfig, (JGroupsDestinationMarshaller) marshaller);
+
     return cluster;
   }
 
@@ -92,28 +90,30 @@ public class JGroupsClusterFactory implements ClusterFactory {
     if (!(destination instanceof JGroupsDestination)) {
       throw new ClusterException();
     }
-    
+
     String destName = marshaller.getDestinationName(destination);
     if (destName == null) {
       throw new ClusterException();
     }
-    
+
     return createCluster(localName, destName);
   }
 
   @Override
-  public Cluster createCluster(String localName, Destination destination, DestinationMarshaller marshaller)
+  public Cluster createCluster(
+      String localName, Destination destination, DestinationMarshaller marshaller)
       throws ClusterException {
-    
-    if (!(destination instanceof JGroupsDestination) || !(marshaller instanceof JGroupsDestinationMarshaller)) {
+
+    if (!(destination instanceof JGroupsDestination)
+        || !(marshaller instanceof JGroupsDestinationMarshaller)) {
       throw new ClusterException();
     }
-    
+
     String destName = marshaller.getDestinationName(destination);
     if (destName == null) {
       throw new ClusterException();
     }
-    
+
     return createCluster(localName, destName, marshaller);
   }
 
@@ -122,12 +122,12 @@ public class JGroupsClusterFactory implements ClusterFactory {
     if (!(destination instanceof JGroupsDestination)) {
       throw new ClusterException();
     }
-    
+
     String destName = marshaller.getDestinationName(destination);
     if (destName == null) {
       throw new ClusterException();
     }
-    
+
     return createCluster(destName);
   }
 }

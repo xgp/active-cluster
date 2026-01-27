@@ -16,21 +16,20 @@ package com.github.xgp.cluster.examples;
 
 import com.github.xgp.cluster.Cluster;
 import com.github.xgp.cluster.ClusterEvent;
-import com.github.xgp.cluster.ClusterException;
 import com.github.xgp.cluster.ClusterListener;
 import com.github.xgp.cluster.Message;
 import com.github.xgp.cluster.MessageConsumer;
 import com.github.xgp.cluster.MessageListener;
 import com.github.xgp.cluster.Node;
-import com.github.xgp.cluster.impl.jgroups.JGroupsClusterFactory;
-import com.github.xgp.cluster.impl.jgroups.JGroupsMessage;
+import com.github.xgp.cluster.jgroups.JGroupsClusterFactory;
+import com.github.xgp.cluster.jgroups.JGroupsMessage;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Scanner;
 
 /**
  * Example application demonstrating the use of JGroups-based cluster implementation.
- * 
+ *
  * <p>Run multiple instances of this application to create a cluster.
  */
 public class JGroupsClusterExample {
@@ -40,58 +39,94 @@ public class JGroupsClusterExample {
       // Create a unique node name or allow user to specify one
       String nodeName = "node-" + System.currentTimeMillis();
       String configFile = null;
-      
+
       if (args.length > 0) {
         nodeName = args[0];
       }
-      
+
       if (args.length > 1) {
         configFile = args[1];
       }
-      
+
       System.out.println("Starting cluster node: " + nodeName);
-      
+
       // Create the cluster factory
       JGroupsClusterFactory factory = new JGroupsClusterFactory(configFile);
-      
+
       // Create and start the cluster
       Cluster cluster = factory.createCluster(nodeName, "example-cluster");
       cluster.start();
-      
+
       // Add a listener to monitor cluster events
       cluster.addClusterListener(new SimpleClusterListener());
-      
+
       // Create a message consumer for the cluster destination with some extra logging
       MessageConsumer consumer = cluster.createConsumer(cluster.getDestination());
       consumer.setMessageListener(new SimpleMessageListener());
-      
+
+      // Create a message consumer for direct messages to this node
+      MessageConsumer directConsumer =
+          cluster.createConsumer(cluster.getLocalNode().getDestination());
+      directConsumer.setMessageListener(new SimpleDirectMessageListener());
+
       System.out.println("Message consumer registered for cluster destination");
       System.out.println("Local node address: " + cluster.getLocalNode().getDestination());
-      
+
       // Update local node state
       Map<String, Object> state = new HashMap<>();
       state.put("startTime", System.currentTimeMillis());
       state.put("hostname", System.getProperty("user.name"));
       cluster.getLocalNode().setState(state);
-      
+
       // Command-line interface
       Scanner scanner = new Scanner(System.in);
       boolean running = true;
-      
-      System.out.println("Cluster node started. Commands: send <message>, nodes, quit");
-      
+
+      System.out.println(
+          "Cluster node started. Commands: send <message>, sendto <nodeName> <message>, nodes, quit");
+
       while (running) {
         System.out.print("> ");
         String line = scanner.nextLine().trim();
-        
+
         if (line.startsWith("send ")) {
           String msgText = line.substring(5);
           Message msg = new JGroupsMessage(msgText);
           msg.setProperty("sender", nodeName);
           msg.setProperty("timestamp", System.currentTimeMillis());
-          
+
           cluster.send(cluster.getDestination(), msg);
           System.out.println("Message sent to cluster");
+        } else if (line.startsWith("sendto ")) {
+          String[] parts = line.split("\\s+", 3);
+          if (parts.length < 3) {
+            System.out.println("Usage: sendto <nodeName> <message>");
+            continue;
+          }
+
+          String targetName = parts[1];
+          String msgText = parts[2];
+
+          Node targetNode = null;
+          for (Node node : cluster.getNodes().values()) {
+            if (targetName.equals(node.getName())) {
+              targetNode = node;
+              break;
+            }
+          }
+
+          if (targetNode == null) {
+            System.out.println("No such node: " + targetName);
+            continue;
+          }
+
+          Message msg = new JGroupsMessage(msgText);
+          msg.setProperty("sender", nodeName);
+          msg.setProperty("timestamp", System.currentTimeMillis());
+          msg.setProperty("direct", true);
+
+          cluster.send(targetNode.getDestination(), msg);
+          System.out.println("Direct message sent to " + targetName);
         } else if (line.equals("nodes")) {
           System.out.println("Current cluster nodes:");
           for (Object value : cluster.getNodes().values()) {
@@ -103,26 +138,25 @@ public class JGroupsClusterExample {
         } else if (line.equals("quit") || line.equals("exit")) {
           running = false;
         } else {
-          System.out.println("Unknown command. Available: send <message>, nodes, quit");
+          System.out.println(
+              "Unknown command. Available: send <message>, sendto <nodeName> <message>, nodes, quit");
         }
       }
-      
+
       // Shutdown
       System.out.println("Shutting down cluster node...");
       cluster.stop();
       scanner.close();
-      
+
     } catch (Exception e) {
       System.err.println("Error: " + e.getMessage());
       e.printStackTrace();
     }
   }
-  
-  /**
-   * Simple implementation of ClusterListener to display cluster events.
-   */
+
+  /** Simple implementation of ClusterListener to display cluster events. */
   static class SimpleClusterListener implements ClusterListener {
-    
+
     @Override
     public void onNodeAdd(ClusterEvent event) {
       System.out.println("[CLUSTER] Node added: " + event.getNode().getName());
@@ -148,17 +182,27 @@ public class JGroupsClusterExample {
       System.out.println("[CLUSTER] New coordinator: " + event.getNode().getName());
     }
   }
-  
-  /**
-   * Simple implementation of MessageListener to display received messages.
-   */
+
+  /** Simple implementation of MessageListener to display received messages. */
   static class SimpleMessageListener implements MessageListener {
-    
+
     @Override
     public void onMessage(Message message) {
       String sender = (String) message.getProperty("sender");
       String text = message.getBody(String.class);
       System.out.println("\n[MESSAGE from " + sender + "] " + text);
+      System.out.print("> "); // Reprint the prompt
+    }
+  }
+
+  /** Simple implementation of MessageListener to display direct messages. */
+  static class SimpleDirectMessageListener implements MessageListener {
+
+    @Override
+    public void onMessage(Message message) {
+      String sender = (String) message.getProperty("sender");
+      String text = message.getBody(String.class);
+      System.out.println("\n[DIRECT from " + sender + "] " + text);
       System.out.print("> "); // Reprint the prompt
     }
   }
