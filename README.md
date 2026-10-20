@@ -107,8 +107,7 @@ mvn test
 mvn verify -Pmultiprocess
 ```
 
-The formatter (`mvn fmt:format`) needs JDK 21; its bundled google-java-format does not run on
-JDK 25.
+Format the code with `mvn fmt:format`; `mvn verify` fails on unformatted code.
 
 To run the example application:
 

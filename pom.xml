@@ -118,10 +118,26 @@
           </systemPropertyVariables>
         </configuration>
       </plugin>
-      <plugin> <!-- pretty up the code using google java standards `mvn fmt:format` -->
+      <plugin> <!-- google-java-format: `mvn fmt:format` to apply; `verify` fails on unformatted code -->
         <groupId>com.spotify.fmt</groupId>
         <artifactId>fmt-maven-plugin</artifactId>
-        <version>2.25</version>
+        <version>2.29</version>
+        <dependencies>
+          <dependency> <!-- pinned so the formatter tracks new JDKs independently of the plugin -->
+            <groupId>com.google.googlejavaformat</groupId>
+            <artifactId>google-java-format</artifactId>
+            <version>1.37.0</version>
+          </dependency>
+        </dependencies>
+        <executions>
+          <execution>
+            <id>check-format</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>check</goal>
+            </goals>
+          </execution>
+        </executions>
       </plugin>
       <plugin> <!-- run the example application using `mvn exec:java` -->
         <groupId>org.codehaus.mojo</groupId>
