@@ -57,7 +57,7 @@ public class JGroupsCluster implements Cluster, Receiver {
   private static final Logger LOG = Logger.getLogger(JGroupsCluster.class.getName());
 
   /** JGroups stack used when the factory was given no configuration. */
-  private static final String DEFAULT_JGROUPS_CONFIG = "minimal.xml";
+  private static final String DEFAULT_JGROUPS_CONFIG = "udp.xml";
 
   /** How long {@link #stop()} waits for survivors to acknowledge the leave announcement. */
   private static final long LEAVE_ACK_TIMEOUT_MS = 3000;
@@ -110,8 +110,8 @@ public class JGroupsCluster implements Cluster, Receiver {
    *
    * @param localNodeName name of the local node
    * @param clusterName name of the cluster
-   * @param configFile JGroups XML configuration file or classpath resource; null for {@code
-   *     minimal.xml}
+   * @param configFile JGroups XML configuration file or classpath resource; null for the UDP
+   *     multicast stack bundled with JGroups ({@code udp.xml})
    * @throws IllegalArgumentException if either name is null or empty, or if they are equal (node
    *     and cluster destinations are compared by name, so they must differ)
    */
@@ -212,7 +212,9 @@ public class JGroupsCluster implements Cluster, Receiver {
     }
   }
 
-  /** Loads the configured stack, or {@code minimal.xml} when none was given; never substitutes. */
+  /**
+   * Loads the configured stack, or JGroups' {@code udp.xml} when none was given; never substitutes.
+   */
   private JChannel createChannel() throws Exception {
     String configFile = jgroupsConfig != null ? jgroupsConfig : DEFAULT_JGROUPS_CONFIG;
     JChannel ch = new JChannel(configFile);

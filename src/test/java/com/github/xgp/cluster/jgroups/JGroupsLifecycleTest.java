@@ -258,4 +258,22 @@ public class JGroupsLifecycleTest extends TestSupport {
     startCluster("node2");
     await("second listener still told about node2", 10000, () -> good.count(ADD, "node2") == 1);
   }
+
+  @Test
+  public void defaultFactoryUsesTheJGroupsBundledUdpStack() throws Exception {
+    JGroupsCluster c =
+        (JGroupsCluster) new JGroupsClusterFactory().createCluster("solo", clusterName());
+    try {
+      c.start();
+      assertEquals(
+          org.jgroups.protocols.UDP.class,
+          c.getChannel().getProtocolStack().getTransport().getClass());
+      String udp = getClass().getClassLoader().getResource("udp.xml").toString();
+      assertTrue(
+          "udp.xml must come from the JGroups jar, not a stale project copy: " + udp,
+          udp.contains("jgroups-"));
+    } finally {
+      c.stop();
+    }
+  }
 }

@@ -23,7 +23,8 @@ import java.util.UUID;
 
 /**
  * Creates {@link JGroupsCluster} members that all use the same JGroups stack. The stack is an XML
- * file path or classpath resource; with none given, {@code minimal.xml} (UDP multicast) is used.
+ * file path or classpath resource; with none given, the UDP multicast stack bundled with JGroups
+ * ({@code udp.xml}) is used. JGroups also bundles {@code tcp.xml} for networks without multicast.
  * Clusters are created unstarted: add listeners, then call {@link Cluster#start()}.
  */
 public class JGroupsClusterFactory implements ClusterFactory {
@@ -31,7 +32,7 @@ public class JGroupsClusterFactory implements ClusterFactory {
   private final String jgroupsConfig;
   private final JGroupsDestinationMarshaller marshaller;
 
-  /** Create a new factory with the default stack, {@code minimal.xml}. */
+  /** Create a new factory with the default stack, JGroups' bundled {@code udp.xml}. */
   public JGroupsClusterFactory() {
     this(null, null);
   }
