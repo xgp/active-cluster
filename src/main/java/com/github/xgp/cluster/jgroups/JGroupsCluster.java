@@ -247,7 +247,8 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
         }
 
         LOG.log(
-            Level.SEVERE, "Failed to load any JGroups configuration, creating with system defaults");
+            Level.SEVERE,
+            "Failed to load any JGroups configuration, creating with system defaults");
         return new JChannel(false); // Create without any config
       }
     }
@@ -653,7 +654,9 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
         LOG.info("Node " + localNode.getName() + " elected coordinator " + winner);
         fire(
             new ClusterEvent(
-                this, coordinator != null ? coordinator : elected, ClusterEvent.ELECTED_COORDINATOR));
+                this,
+                coordinator != null ? coordinator : elected,
+                ClusterEvent.ELECTED_COORDINATOR));
       }
     } catch (Exception e) {
       LOG.log(Level.SEVERE, "Error during coordinator election", e);

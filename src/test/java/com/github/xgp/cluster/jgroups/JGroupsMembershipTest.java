@@ -74,8 +74,7 @@ public class JGroupsMembershipTest extends TestSupport {
           assertSame(self + "'s own entry must be its LocalNode", c.getLocalNode(), n);
         } else {
           assertFalse(
-              self + " holds remote " + n.getName() + " as a LocalNode",
-              n instanceof LocalNode);
+              self + " holds remote " + n.getName() + " as a LocalNode", n instanceof LocalNode);
         }
       }
     }

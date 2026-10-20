@@ -96,6 +96,20 @@ To build the project:
 mvn clean install
 ```
 
+To run the tests:
+
+```bash
+# Unit and in-JVM cluster tests (JGroups SHARED_LOOPBACK plus one real TCP scenario on 127.0.0.1)
+mvn test
+
+# Additionally run the cross-JVM test, which launches the example app in separate processes
+# over TCP on 127.0.0.1 ports 17800-17820
+mvn verify -Pmultiprocess
+```
+
+The formatter (`mvn fmt:format`) needs JDK 21; its bundled google-java-format does not run on
+JDK 25.
+
 To run the example application:
 
 ```bash

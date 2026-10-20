@@ -33,7 +33,8 @@ import org.junit.Test;
  */
 public class JGroupsMultiProcessIT {
 
-  private static final Pattern NODE_LINE = Pattern.compile("^(?:> )*\\s+- (\\S+)( \\(coordinator\\))?$");
+  private static final Pattern NODE_LINE =
+      Pattern.compile("^(?:> )*\\s+- (\\S+)( \\(coordinator\\))?$");
 
   /** One example-app process with its stdout captured line by line. */
   static class Peer {
@@ -139,7 +140,8 @@ public class JGroupsMultiProcessIT {
     cp.add(codeSource(JGroupsClusterExample.class)); // target/classes
     cp.add(codeSource(JGroupsMultiProcessIT.class)); // target/test-classes (test-tcp.xml)
     cp.add(codeSource(JChannel.class)); // the jgroups jar
-    String java = System.getProperty("java.home") + File.separator + "bin" + File.separator + "java";
+    String java =
+        System.getProperty("java.home") + File.separator + "bin" + File.separator + "java";
     ProcessBuilder pb =
         new ProcessBuilder(
             java,
@@ -199,7 +201,10 @@ public class JGroupsMultiProcessIT {
         }
         names.add(n.replace("*", ""));
       }
-      assertEquals(p.name + " listing " + listing, new TreeSet<>(Arrays.asList("node1", "node2", "node3")), names);
+      assertEquals(
+          p.name + " listing " + listing,
+          new TreeSet<>(Arrays.asList("node1", "node2", "node3")),
+          names);
       assertEquals(p.name + " flags exactly one coordinator: " + listing, 1, flagged);
     }
     assertEquals("all processes agree on the coordinator", 1, coordinators.size());

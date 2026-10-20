@@ -64,8 +64,7 @@ public class JGroupsMessagingTest extends TestSupport {
 
   @Test
   public void noLocalConsumerSkipsOwnBroadcastsOnly() throws Exception {
-    QueueListener q =
-        listen(c1.createConsumer(c1.getDestination(), null, true)); // noLocal
+    QueueListener q = listen(c1.createConsumer(c1.getDestination(), null, true)); // noLocal
     QueueListener witness = clusterConsumer(c2);
 
     c1.send(c1.getDestination(), new JGroupsMessage("from-node1"));
