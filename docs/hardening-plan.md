@@ -38,3 +38,18 @@ three-tier test suite exists and passes (`mvn test`, `mvn verify -Pmultiprocess`
 - Publishing (the parent POM's OSSRH deploy target was retired by Sonatype in 2025; moving to the
   Central Portal is the owner's call and lives in `oss-parent`).
 - Replacing Java serialization, a full SQL-92 selector, and a CI workflow.
+
+## Status
+
+All steps are done. Beyond the plan, the iteration loop found and fixed:
+
+- State copies could arrive out of order (a re-broadcast racing `setState`, or a late state
+  transfer) and roll a member's state back. State is now versioned by its owner.
+- A zone change on the local node was never published.
+- The election re-ran only on membership changes, so strategies that read member state could leave
+  members disagreeing. It now also re-runs on state and zone changes.
+- `GroupModel` could list a group twice and overfill it past its maximum, and `BuddyGroupModel`
+  could pick a removed node as a buddy.
+- The project's `tcp.xml` and `udp.xml` shadowed JGroups' own, version-matched files. The project
+  no longer ships stacks and defaults to JGroups' `udp.xml`.
+- The repository had no LICENSE file.
