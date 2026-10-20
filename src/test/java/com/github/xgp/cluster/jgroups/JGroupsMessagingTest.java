@@ -4,13 +4,21 @@ import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.fail;
 
+import com.github.xgp.cluster.ClusterException;
 import com.github.xgp.cluster.Message;
 import com.github.xgp.cluster.MessageConsumer;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.atomic.AtomicInteger;
+import org.jgroups.JChannel;
+import org.jgroups.Receiver;
+import org.jgroups.View;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -182,5 +190,102 @@ public class JGroupsMessagingTest extends TestSupport {
       expected.add(i);
     }
     assertEquals(expected, seqs);
+  }
+
+  /** Counts application messages that physically reach a member's channel. */
+  private static AtomicInteger countArrivals(JGroupsCluster c) {
+    JChannel ch = c.getChannel();
+    Receiver target = ch.getReceiver();
+    AtomicInteger count = new AtomicInteger();
+    ch.setReceiver(
+        new Receiver() {
+          public void receive(org.jgroups.Message msg) {
+            if (msg.getObject() instanceof Message) {
+              count.incrementAndGet();
+            }
+            target.receive(msg);
+          }
+
+          public void viewAccepted(View view) {
+            target.viewAccepted(view);
+          }
+
+          public void getState(OutputStream out) throws Exception {
+            target.getState(out);
+          }
+
+          public void setState(InputStream in) throws Exception {
+            target.setState(in);
+          }
+        });
+    return count;
+  }
+
+  @Test
+  public void directMessageIsPointToPoint() throws Exception {
+    AtomicInteger atNode3 = countArrivals(c3);
+    QueueListener d2 = directConsumer(c2);
+    c1.send(nodeNamed(c1, "node2").getDestination(), new JGroupsMessage("p2p"));
+    assertExactlyOne("direct message on node2", d2);
+    assertEquals("a direct message to node2 must never reach node3", 0, atNode3.get());
+
+    // sanity check that the counter works
+    c1.send(c1.getDestination(), new JGroupsMessage("broadcast"));
+    await("broadcast reaches node3", 5000, () -> atNode3.get() == 1);
+  }
+
+  @Test
+  public void directSendDoesNotModifyTheMessage() throws Exception {
+    QueueListener d2 = directConsumer(c2);
+    Message m = new JGroupsMessage("x");
+    m.setProperty("k", "v");
+    Map<String, Object> before = new HashMap<>(m.getProperties());
+    c1.send(nodeNamed(c1, "node2").getDestination(), m);
+    assertEquals("sender's message is untouched", before, m.getProperties());
+    assertExactlyOne("direct", d2);
+    assertEquals(
+        "receiver sees exactly the sent properties", before, d2.list().get(0).getProperties());
+  }
+
+  @Test
+  public void directMessageToDestinationBuiltByName() throws Exception {
+    QueueListener d2 = directConsumer(c2);
+    c1.send(new JGroupsDestination("node2"), new JGroupsMessage("by-name"));
+    assertExactlyOne("direct by name", d2);
+  }
+
+  @Test
+  public void directMessageToUnknownMemberThrows() throws Exception {
+    try {
+      c1.send(new JGroupsDestination("ghost"), new JGroupsMessage("x"));
+      fail("sending to a node that is not a member must throw");
+    } catch (ClusterException expected) {
+    }
+  }
+
+  @Test
+  public void directMessageToDepartedMemberThrows() throws Exception {
+    JGroupsDestination dest = (JGroupsDestination) nodeNamed(c1, "node2").getDestination();
+    c2.stop();
+    await("node2 gone from node1", 10000, () -> nodeNamed(c1, "node2") == null);
+    try {
+      c1.send(dest, new JGroupsMessage("x"));
+      fail("sending to a departed node must throw");
+    } catch (ClusterException expected) {
+    }
+  }
+
+  @Test
+  public void directMessageRespectsSelector() throws Exception {
+    QueueListener q = listen(c2.createConsumer(c2.getLocalNode().getDestination(), "kind='a'"));
+    Message b = new JGroupsMessage("b");
+    b.setProperty("kind", "b");
+    Message a = new JGroupsMessage("a");
+    a.setProperty("kind", "a");
+    JGroupsDestination to = new JGroupsDestination("node2");
+    c1.send(to, b);
+    c1.send(to, a);
+    assertExactlyOne("kind=a direct", q);
+    assertEquals("a", q.list().get(0).getBody(String.class));
   }
 }

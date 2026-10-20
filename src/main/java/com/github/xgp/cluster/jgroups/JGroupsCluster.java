@@ -344,49 +344,49 @@ public class JGroupsCluster implements Cluster, Receiver {
     this.electionStrategy = strategy != null ? strategy : new BullyElectionStrategy();
   }
 
+  /**
+   * Sends to the whole cluster (multicast, looped back to this member's consumers too) or to one
+   * member (JGroups unicast to that member's current address; no other member receives it). The
+   * message object is not modified.
+   *
+   * @throws ClusterException if not started, if the destination names no current member, or if
+   *     JGroups rejects the send
+   */
   @Override
   public void send(Destination destination, Message message) throws ClusterException {
-    if (!started) {
+    JChannel ch = channel;
+    if (!started || ch == null) {
+      throw new ClusterException();
+    }
+    if (!(destination instanceof JGroupsDestination)) {
       throw new ClusterException();
     }
 
+    Address target = null; // null = multicast
+    if (!destination.equals(clusterDestination)) {
+      target = resolveMember((JGroupsDestination) destination);
+    }
+
     try {
-      LOG.fine("Sending message to destination: " + destination);
+      LOG.fine("Sending message to " + (target == null ? "the cluster" : destination));
+      ch.send(new org.jgroups.ObjectMessage(target, message));
+    } catch (Exception e) {
+      LOG.log(Level.WARNING, "Error sending message to " + destination, e);
+      throw new ClusterException();
+    }
+  }
 
-      if (destination.equals(clusterDestination)) {
-        // Send to entire cluster
-        org.jgroups.Message jgMsg = new org.jgroups.ObjectMessage(null, message);
-
-        // For reliable delivery, set these flags
-        jgMsg.setFlag(org.jgroups.Message.Flag.RSVP); // Request ACK
-        jgMsg.setFlag(org.jgroups.Message.Flag.NO_FC); // No flow control
-
-        // JGroups loops the multicast back into receive(), which delivers it to local
-        // consumers (honouring noLocal), so there is no separate local delivery here.
-        channel.send(jgMsg);
-      } else if (destination instanceof JGroupsDestination) {
-        // Send to specific node
-        JGroupsDestination jgDest = (JGroupsDestination) destination;
-
-        // Send as a targeted cluster message to avoid unreliable unicast delivery.
-        message.setProperty("__direct_to", jgDest.getName());
-        org.jgroups.Message jgMsg = new org.jgroups.ObjectMessage(null, message);
-
-        // For reliable delivery, set these flags
-        jgMsg.setFlag(org.jgroups.Message.Flag.RSVP); // Request ACK
-        jgMsg.setFlag(org.jgroups.Message.Flag.NO_FC); // No flow control
-
-        LOG.fine("Sending targeted message to node: " + jgDest.getName());
-        channel.send(jgMsg);
-      } else {
-        LOG.warning("Unknown destination type: " + destination.getClass().getName());
+  /** The current address of the member named by {@code dest}. */
+  private Address resolveMember(JGroupsDestination dest) throws ClusterException {
+    synchronized (nodes) {
+      Node node = nodes.get(dest);
+      Address addr =
+          node == null ? null : ((JGroupsDestination) node.getDestination()).getAddress();
+      if (addr == null) {
+        LOG.fine("No current member named " + dest.getName());
         throw new ClusterException();
       }
-    } catch (ClusterException e) {
-      throw e;
-    } catch (Exception e) {
-      LOG.log(Level.SEVERE, "Error sending message", e);
-      throw new ClusterException();
+      return addr;
     }
   }
 
@@ -637,37 +637,6 @@ public class JGroupsCluster implements Cluster, Receiver {
         JChannel ch = channel;
         Address self = ch != null ? ch.getAddress() : null;
 
-        // Handle targeted direct messages first
-        Object directTarget = message.getProperty("__direct_to");
-        if (directTarget instanceof String) {
-          String targetName = (String) directTarget;
-          if (!localNode.getName().equals(targetName)) {
-            return; // Not for this node
-          }
-
-          boolean delivered = false;
-          for (JGroupsMessageConsumer consumer : messageConsumers) {
-            if (!consumer.getDestination().equals(localNode.getDestination())) {
-              continue;
-            }
-
-            if (consumer.isNoLocal() && Objects.equals(self, sender)) {
-              continue;
-            }
-
-            if (consumer.matchesSelector(message)) {
-              consumer.onMessage(message);
-              delivered = true;
-            }
-          }
-
-          if (!delivered) {
-            LOG.fine("Direct message had no matching consumers: " + message);
-          }
-
-          return;
-        }
-
         // Deliver to all appropriate consumers
         boolean delivered = false;
         for (JGroupsMessageConsumer consumer : messageConsumers) {
@@ -676,7 +645,7 @@ public class JGroupsCluster implements Cluster, Receiver {
             continue;
           }
 
-          // Check if the message matches this consumer's destination
+          // Multicasts go to cluster-destination consumers, unicasts to local-node consumers
           boolean destMatch = matchesConsumerDestination(consumer, jgMsg);
 
           if (destMatch && consumer.matchesSelector(message)) {
