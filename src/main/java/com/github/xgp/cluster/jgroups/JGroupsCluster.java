@@ -34,7 +34,6 @@ import org.jgroups.JChannel;
 import org.jgroups.MergeView;
 import org.jgroups.Receiver;
 import org.jgroups.View;
-import org.jgroups.blocks.RequestHandler;
 import org.jgroups.util.NameCache;
 
 /**
@@ -53,15 +52,12 @@ import org.jgroups.util.NameCache;
  *
  * @version $Revision: 1.0 $
  */
-public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
+public class JGroupsCluster implements Cluster, Receiver {
 
   private static final Logger LOG = Logger.getLogger(JGroupsCluster.class.getName());
 
-  // Default JGroups configuration if none provided
+  /** JGroups stack used when the factory was given no configuration. */
   private static final String DEFAULT_JGROUPS_CONFIG = "minimal.xml";
-  private static final String SIMPLE_CONFIG = "simple-udp.xml";
-  private static final String TCP_CONFIG = "tcp.xml";
-  private static final String UDP_CONFIG = "udp.xml";
 
   /** How long {@link #stop()} waits for survivors to acknowledge the leave announcement. */
   private static final long LEAVE_ACK_TIMEOUT_MS = 3000;
@@ -70,7 +66,6 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
   private static final long STATE_TRANSFER_TIMEOUT_MS = 10000;
 
   private final String clusterName;
-  private final JGroupsDestinationMarshaller marshaller;
   private final JGroupsLocalNode localNode;
   private final JGroupsDestination clusterDestination;
   private final String jgroupsConfig;
@@ -113,18 +108,13 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
    *
    * @param localNodeName name of the local node
    * @param clusterName name of the cluster
-   * @param configFile JGroups XML configuration file (can be null for default)
-   * @param marshaller destination marshaller (can be null for default)
+   * @param configFile JGroups XML configuration file or classpath resource; null for {@code
+   *     minimal.xml}
    */
-  public JGroupsCluster(
-      String localNodeName,
-      String clusterName,
-      String configFile,
-      JGroupsDestinationMarshaller marshaller) {
+  public JGroupsCluster(String localNodeName, String clusterName, String configFile) {
 
     this.clusterName = clusterName;
     this.jgroupsConfig = configFile;
-    this.marshaller = marshaller != null ? marshaller : new JGroupsDestinationMarshaller();
     this.clusterDestination = new JGroupsDestination(clusterName);
     this.localNode = new JGroupsLocalNode(localNodeName);
     this.localNode.setCluster(this);
@@ -199,59 +189,12 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
     }
   }
 
+  /** Loads the configured stack, or {@code minimal.xml} when none was given; never substitutes. */
   private JChannel createChannel() throws Exception {
-    // A config the caller named explicitly must load as given: silently substituting a
-    // different stack (e.g. UDP for a broken TCP config) would join the wrong cluster.
-    if (jgroupsConfig != null) {
-      JChannel ch = new JChannel(jgroupsConfig);
-      LOG.info("Using JGroups config: " + jgroupsConfig);
-      return ch;
-    }
-
-    // No config named: try the default, then fall back through the bundled configs
-    String configFile = DEFAULT_JGROUPS_CONFIG;
-
-    try {
-      // Try to find the specified config
-      JChannel ch = new JChannel(configFile);
-      LOG.info("Using JGroups config: " + configFile);
-      return ch;
-    } catch (Exception e) {
-      LOG.log(
-          Level.WARNING,
-          "Failed to load JGroups config: " + configFile + ", trying alternate config",
-          e);
-
-      // First try with default JGroups config (no file)
-      try {
-        JChannel ch = new JChannel();
-        LOG.info("Using JGroups built-in default configuration");
-        return ch;
-      } catch (Exception e2) {
-        LOG.log(Level.WARNING, "Failed to use default config, trying other config files", e2);
-
-        // Try different configs in a fallback sequence
-        String[] configs =
-            new String[] {DEFAULT_JGROUPS_CONFIG, SIMPLE_CONFIG, UDP_CONFIG, TCP_CONFIG};
-
-        for (String cfg : configs) {
-          if (!cfg.equals(configFile)) { // Skip the one we already tried
-            try {
-              JChannel ch = new JChannel(cfg);
-              LOG.info("Successfully loaded config: " + cfg);
-              return ch;
-            } catch (Exception e3) {
-              LOG.log(Level.FINE, "Failed to load config: " + cfg, e3);
-            }
-          }
-        }
-
-        LOG.log(
-            Level.SEVERE,
-            "Failed to load any JGroups configuration, creating with system defaults");
-        return new JChannel(false); // Create without any config
-      }
-    }
+    String configFile = jgroupsConfig != null ? jgroupsConfig : DEFAULT_JGROUPS_CONFIG;
+    JChannel ch = new JChannel(configFile);
+    LOG.info("Using JGroups config: " + configFile);
+    return ch;
   }
 
   @Override
@@ -480,7 +423,7 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
    *
    * @param consumer the consumer to register
    */
-  public void registerConsumer(JGroupsMessageConsumer consumer) {
+  void registerConsumer(JGroupsMessageConsumer consumer) {
     if (consumer != null && !messageConsumers.contains(consumer)) {
       messageConsumers.add(consumer);
     }
@@ -491,7 +434,7 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
    *
    * @param consumer the consumer to unregister
    */
-  public void unregisterConsumer(JGroupsMessageConsumer consumer) {
+  void unregisterConsumer(JGroupsMessageConsumer consumer) {
     messageConsumers.remove(consumer);
   }
 
@@ -499,7 +442,7 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
    * Broadcast the local node's state to the other members. A detached copy is sent, never the local
    * node itself, so receivers only ever hold plain {@link JGroupsNode}s for remote members.
    */
-  public void broadcastNodeState() throws Exception {
+  void broadcastNodeState() throws Exception {
     JChannel ch = channel;
     if (!started || ch == null) {
       throw new ClusterException();
@@ -974,23 +917,6 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
       }
       LOG.fine("State transfer completed, cluster has " + nodes.size() + " nodes");
     }
-  }
-
-  // JGroups RequestHandler implementation
-
-  @Override
-  public Object handle(org.jgroups.Message msg) throws Exception {
-    if (msg == null) {
-      return null;
-    }
-
-    Object obj = msg.getObject();
-    if (obj instanceof Message) {
-      // If a direct message is routed through the request handler, handle it here.
-      receive(msg);
-    }
-
-    return null; // No RPC responses used in this implementation
   }
 
   private boolean matchesConsumerDestination(

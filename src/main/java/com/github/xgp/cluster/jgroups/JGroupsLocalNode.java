@@ -5,7 +5,6 @@ import com.github.xgp.cluster.LocalNode;
 import java.util.HashMap;
 import java.util.Map;
 import org.jgroups.Address;
-import org.jgroups.JChannel;
 
 /**
  * JGroups implementation of the LocalNode interface.
@@ -31,7 +30,7 @@ public class JGroupsLocalNode extends JGroupsNode implements LocalNode {
     super(name, address);
   }
 
-  public void setCluster(JGroupsCluster cluster) {
+  void setCluster(JGroupsCluster cluster) {
     this.cluster = cluster;
   }
 
@@ -53,14 +52,5 @@ public class JGroupsLocalNode extends JGroupsNode implements LocalNode {
     } catch (Exception e) {
       throw new ClusterException();
     }
-  }
-
-  /**
-   * Get the JChannel associated with this local node through its cluster.
-   *
-   * @return the JGroups channel or null if not connected to a cluster
-   */
-  public JChannel getChannel() {
-    return cluster != null ? cluster.getChannel() : null;
   }
 }

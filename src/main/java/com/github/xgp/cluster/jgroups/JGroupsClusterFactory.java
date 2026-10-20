@@ -58,8 +58,7 @@ public class JGroupsClusterFactory implements ClusterFactory {
 
   @Override
   public Cluster createCluster(String localName, String destinationName) throws ClusterException {
-    JGroupsCluster cluster =
-        new JGroupsCluster(localName, destinationName, jgroupsConfig, marshaller);
+    JGroupsCluster cluster = new JGroupsCluster(localName, destinationName, jgroupsConfig);
     return cluster;
   }
 
@@ -71,9 +70,7 @@ public class JGroupsClusterFactory implements ClusterFactory {
       throw new ClusterException();
     }
 
-    JGroupsCluster cluster =
-        new JGroupsCluster(
-            localName, destinationName, jgroupsConfig, (JGroupsDestinationMarshaller) marshaller);
+    JGroupsCluster cluster = new JGroupsCluster(localName, destinationName, jgroupsConfig);
 
     return cluster;
   }

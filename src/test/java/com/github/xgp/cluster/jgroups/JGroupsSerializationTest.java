@@ -145,7 +145,7 @@ public class JGroupsSerializationTest {
   private static boolean matches(String selector, String key, Object value) {
     JGroupsMessageConsumer consumer =
         new JGroupsMessageConsumer(
-            new JGroupsCluster("n", "c", null, null), new JGroupsDestination("c"), selector, false);
+            new JGroupsCluster("n", "c", null), new JGroupsDestination("c"), selector, false);
     Message m = new JGroupsMessage("x");
     if (key != null) {
       m.setProperty(key, value);
