@@ -402,20 +402,9 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
         jgMsg.setFlag(org.jgroups.Message.Flag.RSVP); // Request ACK
         jgMsg.setFlag(org.jgroups.Message.Flag.NO_FC); // No flow control
 
+        // JGroups loops the multicast back into receive(), which delivers it to local
+        // consumers (honouring noLocal), so there is no separate local delivery here.
         channel.send(jgMsg);
-
-        // Also process the message locally to ensure the sender gets it too
-        for (JGroupsMessageConsumer consumer : messageConsumers) {
-          if (consumer.getDestination().equals(clusterDestination)
-              && !consumer.isNoLocal()
-              && consumer.matchesSelector(message)) {
-            try {
-              consumer.onMessage(message);
-            } catch (Exception e) {
-              LOG.warning("Error delivering message locally: " + e.getMessage());
-            }
-          }
-        }
       } else if (destination instanceof JGroupsDestination) {
         // Send to specific node
         JGroupsDestination jgDest = (JGroupsDestination) destination;
