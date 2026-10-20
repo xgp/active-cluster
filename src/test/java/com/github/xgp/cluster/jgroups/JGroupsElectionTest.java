@@ -158,4 +158,42 @@ public class JGroupsElectionTest extends TestSupport {
     assertTrue(c1.getLocalNode().isCoordinator());
     assertFalse(c3.getLocalNode().isCoordinator());
   }
+
+  /** Elects the member whose state has the smallest "rank", ties broken by name. */
+  static class LowestRankStrategy implements ElectionStrategy {
+    public Node doElection(Cluster cluster) {
+      Node best = cluster.getLocalNode();
+      for (Node n : cluster.getNodes().values()) {
+        int r = (Integer) n.getState().getOrDefault("rank", Integer.MAX_VALUE);
+        int b = (Integer) best.getState().getOrDefault("rank", Integer.MAX_VALUE);
+        if (r < b || (r == b && n.getName().compareTo(best.getName()) < 0)) {
+          best = n;
+        }
+      }
+      return best;
+    }
+  }
+
+  @Test
+  public void stateDependentStrategyIsReEvaluatedWhenStateChanges() throws Exception {
+    c1 = createCluster("node1");
+    c2 = createCluster("node2");
+    c1.setElectionStrategy(new LowestRankStrategy());
+    c2.setElectionStrategy(new LowestRankStrategy());
+    c1.addClusterListener(l1);
+    c2.addClusterListener(l2);
+    c1.start();
+    c2.start();
+    awaitConverged(c1, c2);
+    awaitCoordinator("node1", c1, c2); // no ranks yet: lowest name
+
+    c2.getLocalNode().setState(java.util.Map.of("rank", 1));
+    awaitCoordinator("node2", c1, c2);
+    assertTrue(c2.getLocalNode().isCoordinator());
+
+    c1.getLocalNode().setState(java.util.Map.of("rank", 0));
+    awaitCoordinator("node1", c1, c2);
+    assertTrue(c1.getLocalNode().isCoordinator());
+    assertFalse(c2.getLocalNode().isCoordinator());
+  }
 }

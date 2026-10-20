@@ -54,7 +54,7 @@ public class JGroupsLocalNode extends JGroupsNode implements LocalNode {
     }
 
     try {
-      cluster.broadcastNodeState();
+      cluster.localStateChanged();
     } catch (Exception e) {
       throw new ClusterException(
           "Failed to publish state of '" + getName() + "': " + e.getMessage(), e);
@@ -73,7 +73,7 @@ public class JGroupsLocalNode extends JGroupsNode implements LocalNode {
     }
     if (cluster != null) {
       try {
-        cluster.broadcastNodeState();
+        cluster.localStateChanged();
       } catch (Exception e) {
         LOG.log(Level.WARNING, "Failed to publish zone of '" + getName() + "'", e);
       }

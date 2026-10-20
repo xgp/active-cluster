@@ -37,20 +37,23 @@ import org.jgroups.View;
 import org.jgroups.util.NameCache;
 
 /**
- * JGroups implementation of the Cluster interface.
+ * JGroups implementation of {@link Cluster}. See {@code docs/architecture.md} for the full design.
  *
  * <p>Membership follows the JGroups view: a remote member is added to {@link #getNodes()} (firing
  * {@code ADD_NODE}) as soon as it appears in a view and its logical name is known, and removed when
  * a view drops it. A member that left via {@link #stop()} announces it first and fires only {@code
- * REMOVE_NODE} on the survivors; any other departure fires {@code FAILED_NODE} then {@code
- * REMOVE_NODE}.
+ * REMOVE_NODE} on the survivors; any other departure, including the far side of a network
+ * partition, fires {@code FAILED_NODE} then {@code REMOVE_NODE}. When a partition heals, the
+ * returning members are added again and every member re-publishes its state.
  *
  * <p>Each node object in {@link #getNodes()} keeps its identity for as long as the member stays in
- * the cluster. State broadcasts update remote entries in place, and {@code UPDATE_NODE} fires only
- * when a remote member's state or zone actually changed. A coordinator is elected on every
- * membership change and {@code ELECTED_COORDINATOR} fires only when the winner changes.
+ * the cluster. State is versioned by its owner; receivers apply only newer versions, update entries
+ * in place, and fire {@code UPDATE_NODE} only when state or zone actually changed. The coordinator
+ * is re-elected on every membership or state change and {@code ELECTED_COORDINATOR} fires only when
+ * the winner changes.
  *
- * @version $Revision: 1.0 $
+ * <p>Broadcasts are JGroups multicasts (looped back to this member's own consumers); direct
+ * messages are JGroups unicasts to the target's current address.
  */
 public class JGroupsCluster implements Cluster, Receiver {
 
@@ -471,6 +474,14 @@ public class JGroupsCluster implements Cluster, Receiver {
    * is sent, never the local node itself, so receivers only ever hold plain {@link JGroupsNode}s
    * for remote members.
    */
+  /** The local node's state or zone changed: re-run the election, then publish. */
+  void localStateChanged() throws Exception {
+    synchronized (nodes) {
+      elect(); // a strategy may depend on state
+    }
+    broadcastNodeState();
+  }
+
   void broadcastNodeState() throws Exception {
     JChannel ch = channel;
     if (!started || ch == null || !ch.isConnected()) {
@@ -569,6 +580,7 @@ public class JGroupsCluster implements Cluster, Receiver {
     existing.setVersion(versionOf(info));
     if (applyInfo(existing, info)) {
       fire(new ClusterEvent(this, existing, ClusterEvent.UPDATE_NODE));
+      elect(); // a strategy may depend on state
     }
   }
 
@@ -912,7 +924,6 @@ public class JGroupsCluster implements Cluster, Receiver {
       if (!started) {
         return;
       }
-      boolean added = false;
       for (JGroupsNode node : received) {
         if (node.getName() == null || node.getName().equals(localNode.getName())) {
           continue;
@@ -930,12 +941,9 @@ public class JGroupsCluster implements Cluster, Receiver {
           updateRemote((JGroupsNode) existing, addr, node);
         } else if (findNodeByAddress(addr) == null) {
           addRemote(node.getName(), addr, node);
-          added = true;
         }
       }
-      if (added) {
-        elect();
-      }
+      elect();
       LOG.fine("State transfer completed, cluster has " + nodes.size() + " nodes");
     }
   }
