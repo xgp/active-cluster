@@ -23,9 +23,10 @@ public class JGroupsNode implements Node, Externalizable {
 
   private String name;
   private JGroupsDestination destination;
-  private Map<String, Object> state = new HashMap<>();
-  private Object zone;
-  private boolean coordinator;
+  // Replaced wholesale on every update so readers always see a complete, immutable snapshot.
+  private volatile Map<String, Object> state = Collections.emptyMap();
+  private volatile Object zone;
+  private volatile boolean coordinator;
 
   // Required for Externalizable
   public JGroupsNode() {}
@@ -47,14 +48,14 @@ public class JGroupsNode implements Node, Externalizable {
 
   @Override
   public Map<String, Object> getState() {
-    return Collections.unmodifiableMap(state);
+    return state;
   }
 
   public void setState(Map<String, Object> state) throws ClusterException {
-    this.state.clear();
-    if (state != null) {
-      this.state.putAll(state);
-    }
+    this.state =
+        state == null || state.isEmpty()
+            ? Collections.emptyMap()
+            : Collections.unmodifiableMap(new HashMap<>(state));
   }
 
   @Override
@@ -84,7 +85,7 @@ public class JGroupsNode implements Node, Externalizable {
   public void writeExternal(ObjectOutput out) throws IOException {
     out.writeUTF(name);
     out.writeObject(destination);
-    out.writeObject(state);
+    out.writeObject(new HashMap<>(state));
     out.writeObject(zone);
     out.writeBoolean(coordinator);
   }
@@ -94,7 +95,11 @@ public class JGroupsNode implements Node, Externalizable {
   public void readExternal(ObjectInput in) throws IOException, ClassNotFoundException {
     name = in.readUTF();
     destination = (JGroupsDestination) in.readObject();
-    state = (Map<String, Object>) in.readObject();
+    Map<String, Object> read = (Map<String, Object>) in.readObject();
+    state =
+        read == null || read.isEmpty()
+            ? Collections.emptyMap()
+            : Collections.unmodifiableMap(new HashMap<>(read));
     zone = in.readObject();
     coordinator = in.readBoolean();
   }

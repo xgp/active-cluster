@@ -12,15 +12,21 @@ import com.github.xgp.cluster.Node;
 import com.github.xgp.cluster.election.ElectionStrategy;
 import com.github.xgp.cluster.election.impl.BullyElectionStrategy;
 import java.io.InputStream;
+import java.io.ObjectInputStream;
+import java.io.ObjectOutputStream;
 import java.io.OutputStream;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import org.jgroups.Address;
@@ -29,13 +35,21 @@ import org.jgroups.MergeView;
 import org.jgroups.Receiver;
 import org.jgroups.View;
 import org.jgroups.blocks.RequestHandler;
-import org.jgroups.blocks.RequestOptions;
-import org.jgroups.blocks.ResponseMode;
-import org.jgroups.blocks.RpcDispatcher;
 import org.jgroups.util.NameCache;
 
 /**
  * JGroups implementation of the Cluster interface.
+ *
+ * <p>Membership follows the JGroups view: a remote member is added to {@link #getNodes()} (firing
+ * {@code ADD_NODE}) as soon as it appears in a view and its logical name is known, and removed when
+ * a view drops it. A member that left via {@link #stop()} announces it first and fires only {@code
+ * REMOVE_NODE} on the survivors; any other departure fires {@code FAILED_NODE} then {@code
+ * REMOVE_NODE}.
+ *
+ * <p>Each node object in {@link #getNodes()} keeps its identity for as long as the member stays in
+ * the cluster. State broadcasts update remote entries in place, and {@code UPDATE_NODE} fires only
+ * when a remote member's state or zone actually changed. A coordinator is elected on every
+ * membership change and {@code ELECTED_COORDINATOR} fires only when the winner changes.
  *
  * @version $Revision: 1.0 $
  */
@@ -49,23 +63,50 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
   private static final String TCP_CONFIG = "tcp.xml";
   private static final String UDP_CONFIG = "udp.xml";
 
+  /** How long {@link #stop()} waits for survivors to acknowledge the leave announcement. */
+  private static final long LEAVE_ACK_TIMEOUT_MS = 3000;
+
+  /** How long {@link #start()} waits for the state transfer from existing members. */
+  private static final long STATE_TRANSFER_TIMEOUT_MS = 10000;
+
   private final String clusterName;
   private final JGroupsDestinationMarshaller marshaller;
   private final JGroupsLocalNode localNode;
   private final JGroupsDestination clusterDestination;
   private final String jgroupsConfig;
-  private final Map<Destination, Node> nodes = Collections.synchronizedMap(new HashMap<>());
+
+  /**
+   * Members keyed by destination (equal by node name). Its monitor guards every field below that is
+   * documented as "guarded by nodes", and cluster events are fired while holding it so listeners
+   * observe them in a consistent order.
+   */
+  private final Map<Destination, Node> nodes = Collections.synchronizedMap(new LinkedHashMap<>());
+
   private final List<ClusterListener> clusterListeners = new CopyOnWriteArrayList<>();
   private final List<JGroupsMessageConsumer> messageConsumers = new CopyOnWriteArrayList<>();
 
-  private JChannel channel;
-  private RpcDispatcher dispatcher;
-  private ElectionStrategy electionStrategy;
-  private Node coordinator;
+  /** Last view applied to {@link #nodes}. Guarded by nodes. */
+  private View currentView;
 
-  // Status flags
-  private boolean started = false;
-  private boolean coordinator_elected = false;
+  /** Name of the currently elected coordinator. Guarded by nodes. */
+  private String coordinatorName;
+
+  /** Members that announced a clean leave and are still in the current view. Guarded by nodes. */
+  private final Set<Address> leaving = new HashSet<>();
+
+  /**
+   * State broadcasts from members that are not (yet) in the current view, or whose name could not
+   * be resolved when their view arrived. Applied when the view catches up. Guarded by nodes.
+   */
+  private final Map<Address, JGroupsNode> pending = new HashMap<>();
+
+  /** Members whose leave acknowledgement {@link #stop()} is waiting for. */
+  private final Set<Address> awaitingLeaveAcks = Collections.synchronizedSet(new HashSet<>());
+
+  private volatile CountDownLatch leaveAcks;
+  private volatile JChannel channel;
+  private volatile ElectionStrategy electionStrategy;
+  private volatile boolean started = false;
 
   /**
    * Create a new JGroups cluster with the provided name and configuration.
@@ -100,145 +141,190 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
   }
 
   @Override
-  public void start() throws ClusterException {
+  public synchronized void start() throws ClusterException {
     if (started) {
       return;
     }
 
     try {
-      // Initialize the JGroups channel - try to find the configuration
-      String configFile = jgroupsConfig != null ? jgroupsConfig : DEFAULT_JGROUPS_CONFIG;
+      channel = createChannel();
 
-      try {
-        // Try to find the specified config
-        channel = new JChannel(configFile);
-        LOG.info("Using JGroups config: " + configFile);
-      } catch (Exception e) {
-        LOG.log(
-            Level.WARNING,
-            "Failed to load JGroups config: " + configFile + ", trying alternate config",
-            e);
-
-        // First try with default JGroups config (no file)
-        try {
-          channel = new JChannel();
-          LOG.info("Using JGroups built-in default configuration");
-        } catch (Exception e2) {
-          LOG.log(Level.WARNING, "Failed to use default config, trying other config files", e2);
-
-          // Try different configs in a fallback sequence
-          String[] configs =
-              new String[] {DEFAULT_JGROUPS_CONFIG, SIMPLE_CONFIG, UDP_CONFIG, TCP_CONFIG};
-
-          boolean success = false;
-          for (String cfg : configs) {
-            if (!cfg.equals(configFile)) { // Skip the one we already tried
-              try {
-                channel = new JChannel(cfg);
-                LOG.info("Successfully loaded config: " + cfg);
-                success = true;
-                break;
-              } catch (Exception e3) {
-                LOG.log(Level.FINE, "Failed to load config: " + cfg, e3);
-              }
-            }
-          }
-
-          if (!success) {
-            LOG.log(
-                Level.SEVERE,
-                "Failed to load any JGroups configuration, creating with system defaults");
-            channel = new JChannel(false); // Create without any config
-          }
-        }
-      }
-
-      // Name the channel for easier debugging
+      // Name the channel for easier debugging; the logical name is also how peers learn ours
       channel.setName(localNode.getName());
       channel.setReceiver(this);
 
-      // RPC dispatcher is optional; direct messaging is sufficient for this implementation.
-      dispatcher = null;
-
-      // Add local node to the nodes map
-      nodes.put(localNode.getDestination(), localNode);
-
-      // Connect to the cluster
-      channel.connect(clusterName);
-
-      // Get the state after connecting
-      try {
-        // Request state transfer after connecting
-        channel.getState(null, 10000);
-        LOG.info("Requested state from existing members");
-      } catch (Exception e) {
-        LOG.log(Level.WARNING, "Failed to get initial state: " + e.getMessage());
-        // Continue anyway, since this might be the first node
+      synchronized (nodes) {
+        nodes.clear();
+        nodes.put(localNode.getDestination(), localNode);
+        currentView = null;
+        coordinatorName = null;
+        leaving.clear();
+        pending.clear();
+        localNode.setCoordinator(false);
       }
 
-      // Set the address in the destination
-      if (localNode.getDestination() instanceof JGroupsDestination) {
-        ((JGroupsDestination) localNode.getDestination()).setAddress(channel.getAddress());
-      }
-
-      // Mark as started
+      // Started before connect so the first view, delivered during connect, is processed.
       started = true;
+      channel.connect(clusterName);
+      localDestination().setAddress(channel.getAddress());
 
-      // Important: Broadcast our presence to the cluster
+      // Pull the existing members' node map (names, addresses and state)
+      View view = channel.getView();
+      if (view != null && view.size() > 1) {
+        try {
+          channel.getState(null, STATE_TRANSFER_TIMEOUT_MS);
+        } catch (Exception e) {
+          LOG.log(Level.WARNING, "Failed to get initial state: " + e.getMessage());
+        }
+      }
+
+      // In case the connect-time view callback was missed, apply the current view (idempotent)
+      handleView(channel.getView());
+
+      // Tell the cluster who we are and what our state is
       broadcastNodeState();
 
-      // Log info about the cluster
-      LOG.info("Node " + localNode.getName() + " connected to cluster " + clusterName);
-      LOG.info("Channel view: " + channel.getView());
-
-      // Initialize coordinator if we're the first node
-      if (channel.getView().size() == 1) {
-        coordinator = localNode;
-        localNode.setCoordinator(true);
-        fireCoordinatorChanged();
-        LOG.info("Node " + localNode.getName() + " is the coordinator");
-      } else {
-        LOG.info("Cluster size: " + channel.getView().size() + " members");
-      }
+      LOG.info(
+          "Node "
+              + localNode.getName()
+              + " connected to cluster "
+              + clusterName
+              + ", view: "
+              + channel.getView());
     } catch (Exception e) {
       LOG.log(Level.SEVERE, "Error starting cluster", e);
+      started = false;
+      closeChannel();
       throw new ClusterException();
     }
   }
 
+  private JChannel createChannel() throws Exception {
+    // Initialize the JGroups channel - try to find the configuration
+    String configFile = jgroupsConfig != null ? jgroupsConfig : DEFAULT_JGROUPS_CONFIG;
+
+    try {
+      // Try to find the specified config
+      JChannel ch = new JChannel(configFile);
+      LOG.info("Using JGroups config: " + configFile);
+      return ch;
+    } catch (Exception e) {
+      LOG.log(
+          Level.WARNING,
+          "Failed to load JGroups config: " + configFile + ", trying alternate config",
+          e);
+
+      // First try with default JGroups config (no file)
+      try {
+        JChannel ch = new JChannel();
+        LOG.info("Using JGroups built-in default configuration");
+        return ch;
+      } catch (Exception e2) {
+        LOG.log(Level.WARNING, "Failed to use default config, trying other config files", e2);
+
+        // Try different configs in a fallback sequence
+        String[] configs =
+            new String[] {DEFAULT_JGROUPS_CONFIG, SIMPLE_CONFIG, UDP_CONFIG, TCP_CONFIG};
+
+        for (String cfg : configs) {
+          if (!cfg.equals(configFile)) { // Skip the one we already tried
+            try {
+              JChannel ch = new JChannel(cfg);
+              LOG.info("Successfully loaded config: " + cfg);
+              return ch;
+            } catch (Exception e3) {
+              LOG.log(Level.FINE, "Failed to load config: " + cfg, e3);
+            }
+          }
+        }
+
+        LOG.log(
+            Level.SEVERE, "Failed to load any JGroups configuration, creating with system defaults");
+        return new JChannel(false); // Create without any config
+      }
+    }
+  }
+
   @Override
-  public void stop() throws ClusterException {
+  public synchronized void stop() throws ClusterException {
     if (!started) {
       return;
     }
 
-    try {
-      // Clean up all message consumers
-      for (JGroupsMessageConsumer consumer : new ArrayList<>(messageConsumers)) {
-        try {
-          consumer.close();
-        } catch (Exception e) {
-          LOG.log(Level.WARNING, "Error closing consumer", e);
-        }
+    // Clean up all message consumers
+    for (JGroupsMessageConsumer consumer : new ArrayList<>(messageConsumers)) {
+      try {
+        consumer.close();
+      } catch (Exception e) {
+        LOG.log(Level.WARNING, "Error closing consumer", e);
       }
+    }
+    messageConsumers.clear();
 
-      // Disconnect and close the channel
-      if (channel != null) {
-        channel.disconnect();
-        channel.close();
-        channel = null;
-      }
+    announceLeave();
 
-      // Clean up
+    // Ignore any callbacks from here on; listeners are kept so a restart keeps them.
+    started = false;
+    closeChannel();
+
+    synchronized (nodes) {
       nodes.clear();
-      clusterListeners.clear();
-      messageConsumers.clear();
-      coordinator = null;
+      currentView = null;
+      coordinatorName = null;
+      leaving.clear();
+      pending.clear();
+      localNode.setCoordinator(false);
+    }
+  }
 
-      // Mark as stopped
-      started = false;
+  /**
+   * Tells the other members this is a clean leave and waits (bounded) until each has acknowledged,
+   * so the view that drops us is reported as REMOVE_NODE rather than a failure.
+   */
+  private void announceLeave() {
+    JChannel ch = channel;
+    if (ch == null || !ch.isConnected()) {
+      return;
+    }
+    View view = ch.getView();
+    if (view == null || view.size() <= 1) {
+      return;
+    }
+    try {
+      Set<Address> others = new HashSet<>(view.getMembers());
+      others.remove(ch.getAddress());
+      awaitingLeaveAcks.clear();
+      awaitingLeaveAcks.addAll(others);
+      CountDownLatch latch = new CountDownLatch(others.size());
+      leaveAcks = latch;
+      ch.send(
+          new org.jgroups.ObjectMessage(
+              null, new ControlMessage(ControlMessage.Kind.LEAVING, localNode.getName())));
+      if (!latch.await(LEAVE_ACK_TIMEOUT_MS, TimeUnit.MILLISECONDS)) {
+        LOG.warning("Leave not acknowledged by " + awaitingLeaveAcks + "; leaving anyway");
+      }
     } catch (Exception e) {
-      throw new ClusterException();
+      LOG.log(Level.FINE, "Could not announce leave", e);
+    } finally {
+      leaveAcks = null;
+      awaitingLeaveAcks.clear();
+    }
+  }
+
+  private void closeChannel() {
+    JChannel ch = channel;
+    channel = null;
+    if (ch != null) {
+      try {
+        ch.disconnect();
+      } catch (Exception e) {
+        LOG.log(Level.FINE, "Error disconnecting channel", e);
+      }
+      try {
+        ch.close();
+      } catch (Exception e) {
+        LOG.log(Level.FINE, "Error closing channel", e);
+      }
     }
   }
 
@@ -247,15 +333,40 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
     return clusterDestination;
   }
 
+  /** A snapshot of the current members; the node objects themselves are live. */
   @Override
   public Map<Destination, Node> getNodes() {
-    return Collections.unmodifiableMap(nodes);
+    synchronized (nodes) {
+      return Collections.unmodifiableMap(new LinkedHashMap<>(nodes));
+    }
   }
 
+  /**
+   * Adds a listener. If the cluster is already started and a coordinator is known, the listener is
+   * immediately sent an {@code ELECTED_COORDINATOR} event for it, so a listener added after {@link
+   * #start()} still learns the current coordinator.
+   */
   @Override
   public void addClusterListener(ClusterListener listener) {
-    if (listener != null && !clusterListeners.contains(listener)) {
+    if (listener == null) {
+      return;
+    }
+    synchronized (nodes) {
+      if (clusterListeners.contains(listener)) {
+        return;
+      }
       clusterListeners.add(listener);
+      if (started && coordinatorName != null) {
+        Node coordinator = nodes.get(new JGroupsDestination(coordinatorName));
+        if (coordinator != null) {
+          try {
+            listener.onCoordinatorChanged(
+                new ClusterEvent(this, coordinator, ClusterEvent.ELECTED_COORDINATOR));
+          } catch (RuntimeException e) {
+            LOG.log(Level.WARNING, "Cluster listener failed", e);
+          }
+        }
+      }
     }
   }
 
@@ -281,7 +392,7 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
     }
 
     try {
-      LOG.info("Sending message to destination: " + destination);
+      LOG.fine("Sending message to destination: " + destination);
 
       if (destination.equals(clusterDestination)) {
         // Send to entire cluster
@@ -291,12 +402,6 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
         jgMsg.setFlag(org.jgroups.Message.Flag.RSVP); // Request ACK
         jgMsg.setFlag(org.jgroups.Message.Flag.NO_FC); // No flow control
 
-        LOG.info("Sending to all cluster members via: " + channel.getView());
-        LOG.info(
-            "Sending cluster message details: dest="
-                + jgMsg.getDest()
-                + ", flags="
-                + jgMsg.getFlags());
         channel.send(jgMsg);
 
         // Also process the message locally to ensure the sender gets it too
@@ -323,19 +428,14 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
         jgMsg.setFlag(org.jgroups.Message.Flag.RSVP); // Request ACK
         jgMsg.setFlag(org.jgroups.Message.Flag.NO_FC); // No flow control
 
-        LOG.info("Sending targeted message to node: " + jgDest.getName());
-        LOG.info(
-            "Targeted message details: dest="
-                + jgMsg.getDest()
-                + ", flags="
-                + jgMsg.getFlags()
-                + ", __direct_to="
-                + message.getProperty("__direct_to"));
+        LOG.fine("Sending targeted message to node: " + jgDest.getName());
         channel.send(jgMsg);
       } else {
         LOG.warning("Unknown destination type: " + destination.getClass().getName());
         throw new ClusterException();
       }
+    } catch (ClusterException e) {
+      throw e;
     } catch (Exception e) {
       LOG.log(Level.SEVERE, "Error sending message", e);
       throw new ClusterException();
@@ -390,120 +490,173 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
     messageConsumers.remove(consumer);
   }
 
-  /** Broadcast the local node's state to the cluster. */
+  /**
+   * Broadcast the local node's state to the other members. A detached copy is sent, never the local
+   * node itself, so receivers only ever hold plain {@link JGroupsNode}s for remote members.
+   */
   public void broadcastNodeState() throws Exception {
-    if (!started || channel == null) {
+    JChannel ch = channel;
+    if (!started || ch == null) {
       throw new ClusterException();
     }
 
-    // First update the local node address if needed
-    if (localNode.getDestination() instanceof JGroupsDestination) {
-      JGroupsDestination dest = (JGroupsDestination) localNode.getDestination();
-      if (dest.getAddress() == null) {
-        dest.setAddress(channel.getAddress());
-      }
+    JGroupsDestination dest = localDestination();
+    if (dest.getAddress() == null) {
+      dest.setAddress(ch.getAddress());
     }
 
-    LOG.info("Broadcasting node state for " + localNode.getName());
+    LOG.fine("Broadcasting node state for " + localNode.getName());
 
-    // Method 1: Use the RPC dispatcher (if configured)
-    if (dispatcher != null) {
+    ClusterEvent event =
+        new ClusterEvent(this, copyAsRemoteNode(localNode), ClusterEvent.UPDATE_NODE);
+    org.jgroups.Message jgMsg = new org.jgroups.BytesMessage();
+    jgMsg.setObject(event);
+    jgMsg.setFlag(org.jgroups.Message.TransientFlag.DONT_LOOPBACK);
+    ch.send(jgMsg);
+  }
+
+  /**
+   * Apply a remote member's state broadcast. Ignored for the local node. An existing entry is
+   * updated in place (keeping its identity and coordinator flag) and {@code UPDATE_NODE} fires only
+   * if its state or zone changed.
+   *
+   * @param event the cluster event containing the updated node
+   * @param src the JGroups address the broadcast came from
+   */
+  void handleNodeUpdate(ClusterEvent event, Address src) {
+    if (event == null || !(event.getNode() instanceof JGroupsNode) || src == null) {
+      return;
+    }
+    JGroupsNode incoming = (JGroupsNode) event.getNode();
+    JChannel ch = channel;
+    if (incoming.getName() == null
+        || incoming.getName().equals(localNode.getName())
+        || (ch != null && src.equals(ch.getAddress()))) {
+      return;
+    }
+
+    synchronized (nodes) {
+      if (!started) {
+        return;
+      }
+      if (currentView == null || !currentView.containsMember(src)) {
+        // Not in our view yet: remember it and apply it when the view arrives
+        pending.put(src, incoming);
+        return;
+      }
+      Node existing = nodes.get(incoming.getDestination());
+      if (existing == null) {
+        // A view member whose name we could not resolve when its view arrived
+        addRemote(incoming.getName(), src, incoming);
+        elect();
+        return;
+      }
+      updateRemote((JGroupsNode) existing, src, incoming);
+    }
+  }
+
+  /** Creates and registers a remote member, firing ADD_NODE. Caller holds the nodes lock. */
+  private JGroupsNode addRemote(String name, Address addr, Node info) {
+    JGroupsNode node = new JGroupsNode(name, addr);
+    if (info != null) {
+      applyInfo(node, info);
+    }
+    nodes.put(node.getDestination(), node);
+    LOG.info("Node " + localNode.getName() + " added member " + name + " (" + addr + ")");
+    fire(new ClusterEvent(this, node, ClusterEvent.ADD_NODE));
+    return node;
+  }
+
+  /** Updates a remote member in place, firing UPDATE_NODE if it changed. Caller holds the lock. */
+  private void updateRemote(JGroupsNode existing, Address addr, Node info) {
+    if (existing == localNode) {
+      return;
+    }
+    JGroupsDestination dest = (JGroupsDestination) existing.getDestination();
+    if (addr != null && !addr.equals(dest.getAddress())) {
+      dest.setAddress(addr);
+    }
+    if (applyInfo(existing, info)) {
+      fire(new ClusterEvent(this, existing, ClusterEvent.UPDATE_NODE));
+    }
+  }
+
+  /** Copies state and zone (never the coordinator flag); returns true if anything changed. */
+  private static boolean applyInfo(JGroupsNode target, Node info) {
+    boolean changed = false;
+    Map<String, Object> state = info.getState();
+    if (!Objects.equals(target.getState(), state)) {
       try {
-        ClusterEvent event = new ClusterEvent(this, localNode, ClusterEvent.UPDATE_NODE);
-        dispatcher.callRemoteMethods(
-            null,
-            "handleNodeUpdate",
-            new Object[] {event},
-            new Class<?>[] {ClusterEvent.class},
-            new RequestOptions(ResponseMode.GET_NONE, 5000));
-        LOG.info("Sent state via RPC");
-      } catch (Exception e) {
-        LOG.warning("RPC state broadcast failed: " + e.getMessage());
+        target.setState(state);
+      } catch (ClusterException e) {
+        // JGroupsNode.setState does not throw
       }
+      changed = true;
     }
+    if (!Objects.equals(target.getZone(), info.getZone())) {
+      target.setZone(info.getZone());
+      changed = true;
+    }
+    return changed;
+  }
 
-    // Method 2: Direct messaging as backup
-    try {
-      ClusterEvent event = new ClusterEvent(this, localNode, ClusterEvent.UPDATE_NODE);
-      org.jgroups.Message jgMsg = new org.jgroups.BytesMessage();
-      jgMsg.setObject(event);
-      channel.send(jgMsg);
-      LOG.info("Sent state via direct message");
-
-      // Also handle it locally to ensure consistency
-      handleNodeUpdate(event);
-    } catch (Exception e) {
-      LOG.warning("Direct message state broadcast failed: " + e.getMessage());
-      throw e;
+  /** Delivers an event to every listener. Caller holds the nodes lock. */
+  private void fire(ClusterEvent event) {
+    for (ClusterListener listener : clusterListeners) {
+      try {
+        switch (event.getType()) {
+          case ClusterEvent.ADD_NODE:
+            listener.onNodeAdd(event);
+            break;
+          case ClusterEvent.UPDATE_NODE:
+            listener.onNodeUpdate(event);
+            break;
+          case ClusterEvent.REMOVE_NODE:
+            listener.onNodeRemoved(event);
+            break;
+          case ClusterEvent.FAILED_NODE:
+            listener.onNodeFailed(event);
+            break;
+          case ClusterEvent.ELECTED_COORDINATOR:
+            listener.onCoordinatorChanged(event);
+            break;
+          default:
+            break;
+        }
+      } catch (RuntimeException e) {
+        LOG.log(Level.WARNING, "Cluster listener failed on " + event, e);
+      }
     }
   }
 
   /**
-   * Handle a node update event from a remote node.
-   *
-   * @param event the cluster event containing the updated node
+   * Runs the election strategy over the current members, flags the winner on every node object and
+   * fires ELECTED_COORDINATOR if the winner changed. Caller holds the nodes lock.
    */
-  public void handleNodeUpdate(ClusterEvent event) {
-    if (event != null && event.getNode() != null) {
-      Node node = event.getNode();
-      event.setCluster(this);
-
-      // Remove any stale placeholder entries that share the same address but different name
-      if (node.getDestination() instanceof JGroupsDestination) {
-        JGroupsDestination incomingDest = (JGroupsDestination) node.getDestination();
-        Address incomingAddr = incomingDest.getAddress();
-        if (incomingAddr != null) {
-          for (Map.Entry<Destination, Node> entry : new ArrayList<>(nodes.entrySet())) {
-            if (entry.getKey() instanceof JGroupsDestination) {
-              JGroupsDestination existingDest = (JGroupsDestination) entry.getKey();
-              if (incomingAddr.equals(existingDest.getAddress())
-                  && !existingDest.equals(incomingDest)) {
-                nodes.remove(entry.getKey());
-              }
-            }
-          }
-        }
-      }
-
-      // Update our local nodes map
-      nodes.put(node.getDestination(), node);
-
-      // Notify listeners
-      for (ClusterListener listener : clusterListeners) {
-        listener.onNodeUpdate(event);
-      }
-    }
-  }
-
-  /** Fire a coordinator changed event to all listeners. */
-  private void fireCoordinatorChanged() {
-    if (coordinator != null) {
-      ClusterEvent event = new ClusterEvent(this, coordinator, ClusterEvent.ELECTED_COORDINATOR);
-      for (ClusterListener listener : clusterListeners) {
-        listener.onCoordinatorChanged(event);
-      }
-    }
-  }
-
-  /** Trigger a new coordinator election. */
-  private void electCoordinator() {
-    if (!started || electionStrategy == null) {
+  private void elect() {
+    ElectionStrategy strategy = electionStrategy;
+    if (!started || strategy == null) {
       return;
     }
 
     try {
-      Node electedNode = electionStrategy.doElection(this);
-
-      if (electedNode != null) {
-        // Update coordinator flag on all nodes
-        for (Node node : nodes.values()) {
-          if (node instanceof JGroupsNode) {
-            ((JGroupsNode) node).setCoordinator(node.equals(electedNode));
-          }
+      Node elected = strategy.doElection(this);
+      if (elected == null) {
+        return;
+      }
+      String winner = elected.getName();
+      for (Node node : nodes.values()) {
+        if (node instanceof JGroupsNode) {
+          ((JGroupsNode) node).setCoordinator(winner.equals(node.getName()));
         }
-
-        this.coordinator = electedNode;
-        fireCoordinatorChanged();
+      }
+      if (!winner.equals(coordinatorName)) {
+        coordinatorName = winner;
+        Node coordinator = nodes.get(new JGroupsDestination(winner));
+        LOG.info("Node " + localNode.getName() + " elected coordinator " + winner);
+        fire(
+            new ClusterEvent(
+                this, coordinator != null ? coordinator : elected, ClusterEvent.ELECTED_COORDINATOR));
       }
     } catch (Exception e) {
       LOG.log(Level.SEVERE, "Error during coordinator election", e);
@@ -519,15 +672,6 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
     }
 
     try {
-      LOG.info(
-          "receive() invoked: src="
-              + jgMsg.getSrc()
-              + ", dest="
-              + jgMsg.getDest()
-              + ", flags="
-              + jgMsg.getFlags()
-              + ", class="
-              + jgMsg.getClass().getName());
       Object obj = jgMsg.getObject();
       LOG.fine(
           "Received message from "
@@ -540,7 +684,8 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
 
         // Get the sender's address
         Address sender = jgMsg.getSrc();
-        LOG.info("Received application message from " + sender);
+        JChannel ch = channel;
+        Address self = ch != null ? ch.getAddress() : null;
 
         // Handle targeted direct messages first
         Object directTarget = message.getProperty("__direct_to");
@@ -556,7 +701,7 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
               continue;
             }
 
-            if (consumer.isNoLocal() && Objects.equals(channel.getAddress(), sender)) {
+            if (consumer.isNoLocal() && Objects.equals(self, sender)) {
               continue;
             }
 
@@ -567,7 +712,7 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
           }
 
           if (!delivered) {
-            LOG.warning("Direct message had no matching consumers, might be dropped: " + message);
+            LOG.fine("Direct message had no matching consumers: " + message);
           }
 
           return;
@@ -577,7 +722,7 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
         boolean delivered = false;
         for (JGroupsMessageConsumer consumer : messageConsumers) {
           // Skip if noLocal is set and this is a local message
-          if (consumer.isNoLocal() && Objects.equals(channel.getAddress(), sender)) {
+          if (consumer.isNoLocal() && Objects.equals(self, sender)) {
             continue;
           }
 
@@ -591,17 +736,15 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
         }
 
         if (!delivered) {
-          LOG.warning("Message had no matching consumers, might be dropped: " + message);
+          LOG.fine("Message had no matching consumers: " + message);
         }
       } else if (obj instanceof ClusterEvent) {
-        // Handle cluster events directly
         ClusterEvent event = (ClusterEvent) obj;
-        LOG.info("Received cluster event: " + event.getType());
-
         if (event.getType() == ClusterEvent.UPDATE_NODE) {
-          updateNodeAddressFromMessage(event, jgMsg);
-          handleNodeUpdate(event);
+          handleNodeUpdate(event, jgMsg.getSrc());
         }
+      } else if (obj instanceof ControlMessage) {
+        handleControl((ControlMessage) obj, jgMsg.getSrc());
       } else {
         LOG.warning(
             "Received unrecognized message type: "
@@ -609,7 +752,34 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
       }
     } catch (Exception e) {
       LOG.log(Level.WARNING, "Error processing received message", e);
-      e.printStackTrace();
+    }
+  }
+
+  private void handleControl(ControlMessage control, Address src) throws Exception {
+    JChannel ch = channel;
+    if (src == null || ch == null) {
+      return;
+    }
+    switch (control.getKind()) {
+      case LEAVING:
+        if (src.equals(ch.getAddress())) {
+          return;
+        }
+        synchronized (nodes) {
+          leaving.add(src);
+        }
+        ch.send(
+            new org.jgroups.ObjectMessage(
+                src, new ControlMessage(ControlMessage.Kind.LEAVE_ACK, localNode.getName())));
+        break;
+      case LEAVE_ACK:
+        CountDownLatch latch = leaveAcks;
+        if (latch != null && awaitingLeaveAcks.remove(src)) {
+          latch.countDown();
+        }
+        break;
+      default:
+        break;
     }
   }
 
@@ -620,73 +790,12 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
     }
 
     try {
-      LOG.info("View members: " + view.getMembers());
-      LOG.info("NameCache: " + NameCache.printCache());
-      LOG.info("View change received: " + view);
-
       if (view instanceof MergeView) {
-        // Handle cluster merge - need to reconcile state
         LOG.info("Cluster merge detected: " + view);
-        handleClusterMerge((MergeView) view);
-      } else {
-        // Handle regular view change
-        handleViewChange(view);
       }
-
-      // Elect a coordinator if needed
-      if (coordinator == null || !nodes.containsValue(coordinator)) {
-        electCoordinator();
-      }
-
-      // After a view change, broadcast our state to make sure everyone knows about us
-      try {
-        broadcastNodeState();
-        LOG.info("Broadcast node state after view change");
-      } catch (Exception e) {
-        LOG.warning("Failed to broadcast node state after view change: " + e.getMessage());
-      }
-
-      // Log current cluster status
-      LOG.info("Current cluster has " + nodes.size() + " nodes after view change");
-      for (Node node : nodes.values()) {
-        LOG.info("  - Node: " + node.getName() + (node.isCoordinator() ? " (coordinator)" : ""));
-      }
+      handleView(view);
     } catch (Exception e) {
       LOG.log(Level.SEVERE, "Error handling view change", e);
-    }
-  }
-
-  public void suspect(Address suspectedAddress) {
-    // Handle suspected node failure
-    if (!started || suspectedAddress == null) {
-      return;
-    }
-
-    try {
-      // Find the node that might have failed
-      Node failedNode = null;
-      Destination failedDest = null;
-
-      for (Map.Entry<Destination, Node> entry : nodes.entrySet()) {
-        if (entry.getKey() instanceof JGroupsDestination) {
-          JGroupsDestination dest = (JGroupsDestination) entry.getKey();
-          if (dest.getAddress() != null && dest.getAddress().equals(suspectedAddress)) {
-            failedNode = entry.getValue();
-            failedDest = entry.getKey();
-            break;
-          }
-        }
-      }
-
-      if (failedNode != null && failedDest != null) {
-        // Notify listeners of suspected failure
-        ClusterEvent event = new ClusterEvent(this, failedNode, ClusterEvent.FAILED_NODE);
-        for (ClusterListener listener : clusterListeners) {
-          listener.onNodeFailed(event);
-        }
-      }
-    } catch (Exception e) {
-      LOG.log(Level.WARNING, "Error handling suspect notification", e);
     }
   }
 
@@ -701,232 +810,159 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
   }
 
   /**
-   * Handle a JGroups view change event.
-   *
-   * @param view the new cluster view
+   * Reconciles {@link #nodes} with a view: departed members are removed (REMOVE_NODE, preceded by
+   * FAILED_NODE unless they announced a clean leave), new members whose names are known are added
+   * (ADD_NODE), then a coordinator is elected. Views older than the last one applied are ignored,
+   * which makes this safe to call more than once for the same view.
    */
-  private void handleViewChange(View view) {
+  private void handleView(View view) {
     if (view == null) {
       return;
     }
 
-    List<Address> members = view.getMembers();
-    List<Address> oldMembers = new ArrayList<>();
-
-    // Get current member addresses
-    for (Node node : nodes.values()) {
-      if (node instanceof JGroupsNode) {
-        JGroupsDestination dest = (JGroupsDestination) node.getDestination();
-        if (dest.getAddress() != null) {
-          oldMembers.add(dest.getAddress());
-        }
+    boolean membersAdded = false;
+    synchronized (nodes) {
+      if (!started) {
+        return;
       }
+      if (currentView != null && view.getViewId().compareToIDs(currentView.getViewId()) <= 0) {
+        return;
+      }
+      currentView = view;
+      LOG.fine("Node " + localNode.getName() + " applying view " + view);
+
+      JChannel ch = channel;
+      Address self = ch != null ? ch.getAddress() : null;
+      JGroupsDestination localDest = localDestination();
+      if (self != null && localDest.getAddress() == null) {
+        localDest.setAddress(self);
+      }
+
+      List<Address> members = view.getMembers();
+
+      // Departures
+      for (Node node : new ArrayList<>(nodes.values())) {
+        if (node == localNode) {
+          continue;
+        }
+        Address addr = ((JGroupsDestination) node.getDestination()).getAddress();
+        if (addr != null && members.contains(addr)) {
+          continue;
+        }
+        nodes.remove(node.getDestination());
+        boolean clean = addr != null && leaving.remove(addr);
+        LOG.info(
+            "Node "
+                + localNode.getName()
+                + (clean ? " saw member leave: " : " saw member fail: ")
+                + node.getName());
+        if (!clean) {
+          fire(new ClusterEvent(this, node, ClusterEvent.FAILED_NODE));
+        }
+        fire(new ClusterEvent(this, node, ClusterEvent.REMOVE_NODE));
+      }
+
+      // Arrivals
+      for (Address addr : members) {
+        if (addr.equals(self) || findNodeByAddress(addr) != null) {
+          continue;
+        }
+        JGroupsNode info = pending.remove(addr);
+        String name = info != null ? info.getName() : NameCache.get(addr);
+        if (name == null || name.isEmpty()) {
+          // Added when its state broadcast (which carries its name) arrives
+          LOG.fine("No logical name yet for " + addr);
+          continue;
+        }
+        if (name.equals(localNode.getName())) {
+          LOG.warning("Ignoring member " + addr + " with the same name as the local node");
+          continue;
+        }
+        Node sameName = nodes.get(new JGroupsDestination(name));
+        if (sameName instanceof JGroupsNode) {
+          // Same name, new address: a restarted member whose old incarnation is still listed
+          updateRemote((JGroupsNode) sameName, addr, info != null ? info : sameName);
+          continue;
+        }
+        addRemote(name, addr, info);
+        membersAdded = true;
+      }
+
+      pending.keySet().retainAll(members);
+      leaving.retainAll(members);
+
+      elect();
     }
 
-    // Check for nodes that have left
-    for (Address oldAddr : oldMembers) {
-      if (!members.contains(oldAddr)) {
-        // Find the node that left
-        Node leftNode = null;
-        Destination leftDest = null;
-
-        for (Map.Entry<Destination, Node> entry : nodes.entrySet()) {
-          JGroupsDestination dest = (JGroupsDestination) entry.getKey();
-          if (dest.getAddress() != null && dest.getAddress().equals(oldAddr)) {
-            leftNode = entry.getValue();
-            leftDest = entry.getKey();
-            break;
-          }
-        }
-
-        if (leftNode != null && leftDest != null) {
-          // Remove from nodes map
-          nodes.remove(leftDest);
-
-          // Notify listeners
-          ClusterEvent event = new ClusterEvent(this, leftNode, ClusterEvent.REMOVE_NODE);
-          for (ClusterListener listener : clusterListeners) {
-            listener.onNodeRemoved(event);
-          }
-
-          // Reset coordinator if it was this node
-          if (leftNode.equals(coordinator)) {
-            coordinator = null;
-          }
-        }
+    // Make sure newcomers have our current state even if the state transfer raced with an update.
+    // Receivers ignore unchanged state, so this never produces spurious UPDATE_NODE events.
+    if (membersAdded) {
+      try {
+        broadcastNodeState();
+      } catch (Exception e) {
+        LOG.log(Level.FINE, "Failed to broadcast node state after view change", e);
       }
-    }
-
-    // Check for new nodes - these would have joined through JChannel.connect()
-    // and should be added to our view
-    for (Address addr : members) {
-      if (addr.equals(channel.getAddress())) {
-        continue;
-      }
-
-      String name = NameCache.get(addr);
-      if (name == null || name.isEmpty()) {
-        name = addr.toString();
-      }
-
-      // If we already have a node with this name but no address, fill it in.
-      JGroupsNode existing = findNodeByName(name);
-      if (existing != null) {
-        if (existing.getDestination() instanceof JGroupsDestination) {
-          JGroupsDestination existingDest = (JGroupsDestination) existing.getDestination();
-          if (existingDest.getAddress() == null) {
-            existingDest.setAddress(addr);
-            LOG.info("Updated node address from view: " + name + " (" + addr + ")");
-          }
-        }
-        continue;
-      }
-
-      boolean found = false;
-      for (Destination dest : nodes.keySet()) {
-        if (dest instanceof JGroupsDestination) {
-          JGroupsDestination jgDest = (JGroupsDestination) dest;
-          if (jgDest.getAddress() != null && jgDest.getAddress().equals(addr)) {
-            found = true;
-            break;
-          }
-        }
-      }
-
-      if (!found) {
-        // Create a placeholder node from the view so we can surface it immediately
-        JGroupsNode node = new JGroupsNode(name, addr);
-        nodes.put(node.getDestination(), node);
-
-        ClusterEvent event = new ClusterEvent(this, node, ClusterEvent.ADD_NODE);
-        for (ClusterListener listener : clusterListeners) {
-          listener.onNodeAdd(event);
-        }
-
-        LOG.info("New node detected and added from view: " + name + " (" + addr + ")");
-      }
-    }
-  }
-
-  /**
-   * Handle a JGroups merge view event (when a network partition heals).
-   *
-   * @param mergeView the merge view
-   */
-  private void handleClusterMerge(MergeView mergeView) {
-    LOG.info("Handling cluster merge: " + mergeView);
-
-    // For a merge, we need to request full state from all subgroups
-    // This is a simplistic implementation - in production, you might want
-    // more sophisticated conflict resolution
-
-    // Reset coordinator since we need to elect a new one across the merged cluster
-    coordinator = null;
-
-    // Ask for state transfer to synchronize node information
-    try {
-      channel.getState(null, 10000);
-    } catch (Exception e) {
-      LOG.log(Level.WARNING, "Error requesting state during merge", e);
     }
   }
 
   @Override
   public void getState(OutputStream output) throws Exception {
-    // Instead of using Util.objectToStream which requires DataOutput,
-    // we'll create our own serialization approach that's more reliable
+    List<JGroupsNode> toWrite = new ArrayList<>();
     synchronized (nodes) {
-      try {
-        // We'll serialize the nodes manually to have more control
-        java.io.ObjectOutputStream oos = new java.io.ObjectOutputStream(output);
-
-        // Write the number of nodes actually serialized
-        Collection<Node> nodeList = nodes.values();
-        List<Node> toWrite = new ArrayList<>();
-        for (Node node : nodeList) {
-          if (node instanceof JGroupsLocalNode) {
-            toWrite.add(copyAsRemoteNode(node));
-          } else if (node instanceof JGroupsNode) {
-            toWrite.add(node);
-          }
-        }
-
-        oos.writeInt(toWrite.size());
-
-        // Write each node individually
-        for (Node node : toWrite) {
-          oos.writeObject(node);
-        }
-
-        oos.flush();
-        LOG.info("Serialized " + toWrite.size() + " nodes for state transfer");
-      } catch (Exception e) {
-        LOG.log(Level.SEVERE, "Error serializing state", e);
-        throw e;
+      for (Node node : nodes.values()) {
+        toWrite.add(copyAsRemoteNode(node));
       }
     }
+    ObjectOutputStream oos = new ObjectOutputStream(output);
+    oos.writeInt(toWrite.size());
+    for (Node node : toWrite) {
+      oos.writeObject(node);
+    }
+    oos.flush();
+    LOG.fine("Serialized " + toWrite.size() + " nodes for state transfer");
   }
 
-  @SuppressWarnings("unchecked")
   @Override
   public void setState(InputStream input) throws Exception {
-    // Use a more careful deserialization approach
-    try {
-      java.io.ObjectInputStream ois = new java.io.ObjectInputStream(input);
-
-      // Read the node count
-      int nodeCount = ois.readInt();
-      LOG.info("Preparing to receive " + nodeCount + " nodes from state transfer");
-
-      // Update our local view
-      synchronized (nodes) {
-        // Keep our local node
-        Node localNode = nodes.get(this.localNode.getDestination());
-        if (localNode == null) {
-          nodes.put(this.localNode.getDestination(), this.localNode);
-          localNode = this.localNode;
-        }
-
-        // Snapshot existing destinations for add events
-        Map<Destination, Node> existing = new HashMap<>(nodes);
-
-        // Read each node
-        for (int i = 0; i < nodeCount; i++) {
-          try {
-            Node node = (Node) ois.readObject();
-            if (node != null && !node.equals(localNode)) {
-              Node prior = nodes.get(node.getDestination());
-              if (prior != null
-                  && prior.getDestination() instanceof JGroupsDestination
-                  && node.getDestination() instanceof JGroupsDestination) {
-                JGroupsDestination priorDest = (JGroupsDestination) prior.getDestination();
-                JGroupsDestination incomingDest = (JGroupsDestination) node.getDestination();
-                if (incomingDest.getAddress() == null && priorDest.getAddress() != null) {
-                  incomingDest.setAddress(priorDest.getAddress());
-                }
-              }
-
-              boolean isNew = !existing.containsKey(node.getDestination());
-              nodes.put(node.getDestination(), node);
-
-              if (isNew) {
-                ClusterEvent event = new ClusterEvent(this, node, ClusterEvent.ADD_NODE);
-                for (ClusterListener listener : clusterListeners) {
-                  listener.onNodeAdd(event);
-                }
-              }
-            }
-          } catch (Exception e) {
-            LOG.log(Level.WARNING, "Error deserializing a node, skipping", e);
-            // Continue with next node
-          }
-        }
-
-        LOG.info("State transfer completed, cluster has " + nodes.size() + " nodes");
+    ObjectInputStream ois = new ObjectInputStream(input);
+    int nodeCount = ois.readInt();
+    List<JGroupsNode> received = new ArrayList<>();
+    for (int i = 0; i < nodeCount; i++) {
+      Object o = ois.readObject();
+      if (o instanceof JGroupsNode) {
+        received.add((JGroupsNode) o);
       }
-    } catch (Exception e) {
-      LOG.log(Level.SEVERE, "Error deserializing state", e);
-      throw e;
+    }
+
+    synchronized (nodes) {
+      if (!started) {
+        return;
+      }
+      boolean added = false;
+      for (JGroupsNode node : received) {
+        if (node.getName() == null || node.getName().equals(localNode.getName())) {
+          continue;
+        }
+        Address addr = ((JGroupsDestination) node.getDestination()).getAddress();
+        if (addr == null) {
+          continue;
+        }
+        if (currentView == null || !currentView.containsMember(addr)) {
+          pending.put(addr, node);
+          continue;
+        }
+        Node existing = nodes.get(node.getDestination());
+        if (existing instanceof JGroupsNode) {
+          updateRemote((JGroupsNode) existing, addr, node);
+        } else if (findNodeByAddress(addr) == null) {
+          addRemote(node.getName(), addr, node);
+          added = true;
+        }
+      }
+      if (added) {
+        elect();
+      }
+      LOG.fine("State transfer completed, cluster has " + nodes.size() + " nodes");
     }
   }
 
@@ -938,15 +974,6 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
       return null;
     }
 
-    LOG.info(
-        "handle() invoked: src="
-            + msg.getSrc()
-            + ", dest="
-            + msg.getDest()
-            + ", flags="
-            + msg.getFlags()
-            + ", class="
-            + msg.getClass().getName());
     Object obj = msg.getObject();
     if (obj instanceof Message) {
       // If a direct message is routed through the request handler, handle it here.
@@ -976,34 +1003,21 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
     return consumerDest.equals(localNode.getDestination());
   }
 
-  private void updateNodeAddressFromMessage(ClusterEvent event, org.jgroups.Message jgMsg) {
-    if (event == null || event.getNode() == null || jgMsg == null) {
-      return;
-    }
-
-    if (event.getNode().getDestination() instanceof JGroupsDestination) {
-      JGroupsDestination dest = (JGroupsDestination) event.getNode().getDestination();
-      if (dest.getAddress() == null) {
-        dest.setAddress(jgMsg.getSrc());
-      }
-    }
+  private JGroupsDestination localDestination() {
+    return (JGroupsDestination) localNode.getDestination();
   }
 
-  private JGroupsNode findNodeByName(String name) {
-    if (name == null) {
-      return null;
-    }
-
+  /** Caller holds the nodes lock. */
+  private Node findNodeByAddress(Address addr) {
     for (Node node : nodes.values()) {
-      if (node instanceof JGroupsNode && name.equals(node.getName())) {
-        return (JGroupsNode) node;
+      if (addr.equals(((JGroupsDestination) node.getDestination()).getAddress())) {
+        return node;
       }
     }
-
     return null;
   }
 
-  private JGroupsNode copyAsRemoteNode(Node node) {
+  private static JGroupsNode copyAsRemoteNode(Node node) {
     JGroupsNode copy = new JGroupsNode(node.getName());
     try {
       copy.setState(node.getState());
@@ -1021,25 +1035,5 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
     }
 
     return copy;
-  }
-
-  private Address resolveAddressByName(String name) {
-    if (name == null || channel == null) {
-      return null;
-    }
-
-    View view = channel.getView();
-    if (view == null) {
-      return null;
-    }
-
-    for (Address addr : view.getMembers()) {
-      String addrName = NameCache.get(addr);
-      if (name.equals(addrName)) {
-        return addr;
-      }
-    }
-
-    return null;
   }
 }
