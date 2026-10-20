@@ -8,16 +8,16 @@ package com.github.xgp.cluster;
 public interface Service {
 
   /**
-   * Called to start the service
+   * Starts the service. Calling it on a started service has no effect.
    *
-   * @throws ClusterException
+   * @throws ClusterException if the service cannot be started
    */
   public void start() throws ClusterException;
 
   /**
-   * Called to shutdown the service
+   * Stops the service. Calling it on a stopped service has no effect.
    *
-   * @throws ClusterException
+   * @throws ClusterException if the service cannot be stopped cleanly
    */
   public void stop() throws ClusterException;
 }

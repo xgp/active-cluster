@@ -19,7 +19,8 @@ import com.github.xgp.cluster.ClusterException;
 import com.github.xgp.cluster.Node;
 
 /**
- * <code>Service</code> Used by the Cluster to elect a coordinator.
+ * Chooses the coordinator. It runs on every member at each membership change, over the same set of
+ * members, so a deterministic strategy makes every member reach the same answer.
  *
  * @version $Revision: 1.2 $
  */
@@ -28,9 +29,9 @@ public interface ElectionStrategy {
   /**
    * Elect a coordinator.
    *
-   * @param cluster
-   * @return the elected Node
-   * @throws ClusterException
+   * @param cluster the cluster, whose {@link Cluster#getNodes()} are the candidates
+   * @return the elected Node, which must be one of the candidates
+   * @throws ClusterException if no coordinator can be chosen
    */
   public Node doElection(Cluster cluster) throws ClusterException;
 }
