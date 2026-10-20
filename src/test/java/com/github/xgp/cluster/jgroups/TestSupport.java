@@ -8,6 +8,8 @@ import com.github.xgp.cluster.ClusterListener;
 import com.github.xgp.cluster.Message;
 import com.github.xgp.cluster.MessageListener;
 import com.github.xgp.cluster.Node;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
@@ -16,8 +18,14 @@ import java.util.TreeSet;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BooleanSupplier;
+import org.jgroups.Address;
 import org.jgroups.JChannel;
+import org.jgroups.MergeView;
+import org.jgroups.Receiver;
+import org.jgroups.View;
+import org.jgroups.protocols.DISCARD;
 import org.jgroups.util.Util;
 import org.junit.After;
 import org.junit.Rule;
@@ -31,6 +39,7 @@ public abstract class TestSupport {
 
   public static final String LOOPBACK_CONFIG = "test-loopback.xml";
   public static final String TCP_CONFIG = "test-tcp.xml";
+  public static final String PARTITION_CONFIG = "test-partition.xml";
 
   @Rule public final TestName testName = new TestName();
 
@@ -188,6 +197,87 @@ public abstract class TestSupport {
   /** Kills a member's channel without a graceful leave so failure detection must notice. */
   public static void crash(Cluster c) throws Exception {
     Util.shutdown(((JGroupsCluster) c).getChannel());
+  }
+
+  // Interception and partitions
+  // -------------------------------------------------------------------------
+
+  /** What a {@link #tap} observed on one member's channel. */
+  public static class Tap {
+    public final AtomicInteger appMessages = new AtomicInteger();
+    public final AtomicInteger mergeViews = new AtomicInteger();
+  }
+
+  /**
+   * Interposes on a member's JGroups receiver, counting application messages that physically reach
+   * the channel and merge views it installs, then delegating everything to the cluster.
+   */
+  public static Tap tap(JGroupsCluster c) {
+    JChannel ch = c.getChannel();
+    Receiver target = ch.getReceiver();
+    Tap tap = new Tap();
+    ch.setReceiver(
+        new Receiver() {
+          public void receive(org.jgroups.Message msg) {
+            if (msg.getObject() instanceof com.github.xgp.cluster.Message) {
+              tap.appMessages.incrementAndGet();
+            }
+            target.receive(msg);
+          }
+
+          public void viewAccepted(View view) {
+            if (view instanceof MergeView) {
+              tap.mergeViews.incrementAndGet();
+            }
+            target.viewAccepted(view);
+          }
+
+          public void getState(OutputStream out) throws Exception {
+            target.getState(out);
+          }
+
+          public void setState(InputStream in) throws Exception {
+            target.setState(in);
+          }
+        });
+    return tap;
+  }
+
+  private static DISCARD discard(Cluster c) {
+    DISCARD d = ((JGroupsCluster) c).getChannel().getProtocolStack().findProtocol(DISCARD.class);
+    if (d == null) {
+      throw new IllegalStateException("stack has no DISCARD protocol; use test-partition.xml");
+    }
+    return d;
+  }
+
+  /** Cuts every member of {@code a} off from every member of {@code b}, in both directions. */
+  public static void partition(Cluster[] a, Cluster[] b) {
+    for (Cluster x : a) {
+      for (Cluster y : b) {
+        Address ax = ((JGroupsCluster) x).getChannel().getAddress();
+        Address ay = ((JGroupsCluster) y).getChannel().getAddress();
+        discard(x).addIgnoreMember(ay);
+        discard(y).addIgnoreMember(ax);
+      }
+    }
+  }
+
+  /** Removes every partition installed by {@link #partition}. */
+  public static void heal(Cluster... cs) {
+    for (Cluster c : cs) {
+      discard(c).resetIgnoredMembers();
+    }
+  }
+
+  /** Waits until each member's own channel view has exactly {@code size} members. */
+  public static void awaitViewSize(int size, long timeoutMs, Cluster... cs) {
+    for (Cluster c : cs) {
+      await(
+          c.getLocalNode().getName() + " view size " + size,
+          timeoutMs,
+          () -> ((JGroupsCluster) c).getChannel().getView().size() == size);
+    }
   }
 
   // Recorders

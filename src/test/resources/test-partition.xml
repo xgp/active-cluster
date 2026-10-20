@@ -1,0 +1,19 @@
+<!-- test-loopback.xml plus DISCARD directly above the transport, so tests can cut members off
+     from each other (DISCARD.addIgnoreMember) and heal the partition again. -->
+<config xmlns="urn:org:jgroups" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+        xsi:schemaLocation="urn:org:jgroups http://www.jgroups.org/schema/jgroups.xsd">
+  <SHARED_LOOPBACK/>
+  <DISCARD/>
+  <SHARED_LOOPBACK_PING/>
+  <MERGE3 min_interval="500" max_interval="1500"/>
+  <FD_ALL3 timeout="2000" interval="500"/>
+  <VERIFY_SUSPECT timeout="500"/>
+  <pbcast.NAKACK2/>
+  <UNICAST3/>
+  <pbcast.STABLE/>
+  <pbcast.GMS join_timeout="1000"/>
+  <UFC/>
+  <MFC/>
+  <FRAG2/>
+  <pbcast.STATE_TRANSFER/>
+</config>

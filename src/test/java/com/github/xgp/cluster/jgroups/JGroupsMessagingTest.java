@@ -9,16 +9,11 @@ import static org.junit.Assert.fail;
 import com.github.xgp.cluster.ClusterException;
 import com.github.xgp.cluster.Message;
 import com.github.xgp.cluster.MessageConsumer;
-import java.io.InputStream;
-import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
-import org.jgroups.JChannel;
-import org.jgroups.Receiver;
-import org.jgroups.View;
 import org.junit.Before;
 import org.junit.Test;
 
@@ -192,38 +187,9 @@ public class JGroupsMessagingTest extends TestSupport {
     assertEquals(expected, seqs);
   }
 
-  /** Counts application messages that physically reach a member's channel. */
-  private static AtomicInteger countArrivals(JGroupsCluster c) {
-    JChannel ch = c.getChannel();
-    Receiver target = ch.getReceiver();
-    AtomicInteger count = new AtomicInteger();
-    ch.setReceiver(
-        new Receiver() {
-          public void receive(org.jgroups.Message msg) {
-            if (msg.getObject() instanceof Message) {
-              count.incrementAndGet();
-            }
-            target.receive(msg);
-          }
-
-          public void viewAccepted(View view) {
-            target.viewAccepted(view);
-          }
-
-          public void getState(OutputStream out) throws Exception {
-            target.getState(out);
-          }
-
-          public void setState(InputStream in) throws Exception {
-            target.setState(in);
-          }
-        });
-    return count;
-  }
-
   @Test
   public void directMessageIsPointToPoint() throws Exception {
-    AtomicInteger atNode3 = countArrivals(c3);
+    AtomicInteger atNode3 = tap(c3).appMessages;
     QueueListener d2 = directConsumer(c2);
     c1.send(nodeNamed(c1, "node2").getDestination(), new JGroupsMessage("p2p"));
     assertExactlyOne("direct message on node2", d2);
