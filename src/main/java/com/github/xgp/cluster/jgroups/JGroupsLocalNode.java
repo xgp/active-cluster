@@ -3,6 +3,8 @@ package com.github.xgp.cluster.jgroups;
 import com.github.xgp.cluster.ClusterException;
 import com.github.xgp.cluster.LocalNode;
 import java.util.Map;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 import org.jgroups.Address;
 
 /**
@@ -13,6 +15,8 @@ import org.jgroups.Address;
 public class JGroupsLocalNode extends JGroupsNode implements LocalNode {
 
   private static final long serialVersionUID = -7213743750639969514L;
+
+  private static final Logger LOG = Logger.getLogger(JGroupsLocalNode.class.getName());
 
   private transient JGroupsCluster cluster;
 
@@ -44,13 +48,35 @@ public class JGroupsLocalNode extends JGroupsNode implements LocalNode {
       throw new ClusterException("Local node '" + getName() + "' is not attached to a cluster");
     }
 
-    super.setState(state);
+    synchronized (this) {
+      super.setState(state);
+      setVersion(getVersion() + 1);
+    }
 
     try {
       cluster.broadcastNodeState();
     } catch (Exception e) {
       throw new ClusterException(
           "Failed to publish state of '" + getName() + "': " + e.getMessage(), e);
+    }
+  }
+
+  /**
+   * Sets this member's zone (for example a DMZ or subnet, used by {@link
+   * com.github.xgp.cluster.group.MasterZoneFilter}) and publishes it like a state change.
+   */
+  @Override
+  public void setZone(Object zone) {
+    synchronized (this) {
+      super.setZone(zone);
+      setVersion(getVersion() + 1);
+    }
+    if (cluster != null) {
+      try {
+        cluster.broadcastNodeState();
+      } catch (Exception e) {
+        LOG.log(Level.WARNING, "Failed to publish zone of '" + getName() + "'", e);
+      }
     }
   }
 }

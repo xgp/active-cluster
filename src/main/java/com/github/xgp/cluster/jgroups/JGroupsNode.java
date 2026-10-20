@@ -27,6 +27,8 @@ public class JGroupsNode implements Node, Externalizable {
   private volatile Map<String, Object> state = Collections.emptyMap();
   private volatile Object zone;
   private volatile boolean coordinator;
+  // Incremented by the owning member on every state change; lets receivers discard stale copies.
+  private volatile long version;
 
   // Required for Externalizable
   public JGroupsNode() {}
@@ -72,6 +74,15 @@ public class JGroupsNode implements Node, Externalizable {
     this.coordinator = coordinator;
   }
 
+  /** The owner's state version: higher is newer within one incarnation of the member. */
+  long getVersion() {
+    return version;
+  }
+
+  void setVersion(long version) {
+    this.version = version;
+  }
+
   @Override
   public Object getZone() {
     return zone;
@@ -88,6 +99,7 @@ public class JGroupsNode implements Node, Externalizable {
     out.writeObject(new HashMap<>(state));
     out.writeObject(zone);
     out.writeBoolean(coordinator);
+    out.writeLong(version);
   }
 
   @SuppressWarnings("unchecked")
@@ -102,6 +114,7 @@ public class JGroupsNode implements Node, Externalizable {
             : Collections.unmodifiableMap(new HashMap<>(read));
     zone = in.readObject();
     coordinator = in.readBoolean();
+    version = in.readLong();
   }
 
   @Override

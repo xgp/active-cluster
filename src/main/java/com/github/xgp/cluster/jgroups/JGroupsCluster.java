@@ -98,6 +98,8 @@ public class JGroupsCluster implements Cluster, Receiver {
   /** Members whose leave acknowledgement {@link #stop()} is waiting for. */
   private final Set<Address> awaitingLeaveAcks = Collections.synchronizedSet(new HashSet<>());
 
+  private final Object stateSendLock = new Object();
+
   private volatile CountDownLatch leaveAcks;
   private volatile JChannel channel;
   private volatile ElectionStrategy electionStrategy;
@@ -247,6 +249,7 @@ public class JGroupsCluster implements Cluster, Receiver {
       leaving.clear();
       pending.clear();
       localNode.setCoordinator(false);
+      localDestination().setAddress(null); // a restart gets a new JGroups address
     }
   }
 
@@ -477,14 +480,19 @@ public class JGroupsCluster implements Cluster, Receiver {
       dest.setAddress(ch.getAddress());
     }
 
-    LOG.fine("Broadcasting node state for " + localNode.getName());
-
-    ClusterEvent event =
-        new ClusterEvent(this, copyAsRemoteNode(localNode), ClusterEvent.UPDATE_NODE);
-    org.jgroups.Message jgMsg = new org.jgroups.BytesMessage();
-    jgMsg.setObject(event);
-    jgMsg.setFlag(org.jgroups.Message.TransientFlag.DONT_LOOPBACK);
-    ch.send(jgMsg);
+    // Snapshot and send under one lock so concurrent broadcasts leave in version order
+    synchronized (stateSendLock) {
+      JGroupsNode copy;
+      synchronized (localNode) {
+        copy = copyAsRemoteNode(localNode);
+      }
+      LOG.fine("Broadcasting state v" + copy.getVersion() + " of " + localNode.getName());
+      ClusterEvent event = new ClusterEvent(this, copy, ClusterEvent.UPDATE_NODE);
+      org.jgroups.Message jgMsg = new org.jgroups.BytesMessage();
+      jgMsg.setObject(event);
+      jgMsg.setFlag(org.jgroups.Message.TransientFlag.DONT_LOOPBACK);
+      ch.send(jgMsg);
+    }
   }
 
   /**
@@ -532,6 +540,7 @@ public class JGroupsCluster implements Cluster, Receiver {
     JGroupsNode node = new JGroupsNode(name, addr);
     if (info != null) {
       applyInfo(node, info);
+      node.setVersion(versionOf(info));
     }
     nodes.put(node.getDestination(), node);
     LOG.info("Node " + localNode.getName() + " added member " + name + " (" + addr + ")");
@@ -539,18 +548,30 @@ public class JGroupsCluster implements Cluster, Receiver {
     return node;
   }
 
-  /** Updates a remote member in place, firing UPDATE_NODE if it changed. Caller holds the lock. */
+  /**
+   * Updates a remote member in place, firing UPDATE_NODE if it changed. Within one incarnation
+   * (same address) only a newer state version is applied, so re-broadcasts, state transfers and
+   * merges that arrive late can never roll state back. Caller holds the lock.
+   */
   private void updateRemote(JGroupsNode existing, Address addr, Node info) {
     if (existing == localNode) {
       return;
     }
     JGroupsDestination dest = (JGroupsDestination) existing.getDestination();
-    if (addr != null && !addr.equals(dest.getAddress())) {
+    boolean newIncarnation = addr != null && !addr.equals(dest.getAddress());
+    if (newIncarnation) {
       dest.setAddress(addr);
+    } else if (versionOf(info) <= existing.getVersion()) {
+      return; // duplicate or stale copy
     }
+    existing.setVersion(versionOf(info));
     if (applyInfo(existing, info)) {
       fire(new ClusterEvent(this, existing, ClusterEvent.UPDATE_NODE));
     }
+  }
+
+  private static long versionOf(Node info) {
+    return info instanceof JGroupsNode ? ((JGroupsNode) info).getVersion() : 0;
   }
 
   /** Copies state and zone (never the coordinator flag); returns true if anything changed. */
@@ -960,6 +981,9 @@ public class JGroupsCluster implements Cluster, Receiver {
     }
     copy.setZone(node.getZone());
     copy.setCoordinator(node.isCoordinator());
+    if (node instanceof JGroupsNode) {
+      copy.setVersion(((JGroupsNode) node).getVersion());
+    }
 
     if (node.getDestination() instanceof JGroupsDestination
         && copy.getDestination() instanceof JGroupsDestination) {

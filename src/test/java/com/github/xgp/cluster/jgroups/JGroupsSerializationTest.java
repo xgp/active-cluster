@@ -56,8 +56,10 @@ public class JGroupsSerializationTest {
     n.setState(state);
     n.setZone("dmz");
     n.setCoordinator(true);
+    n.setVersion(7);
 
     JGroupsNode copy = roundTrip(n);
+    assertEquals(7, copy.getVersion());
     assertEquals(JGroupsNode.class, copy.getClass());
     assertEquals("node1", copy.getName());
     assertEquals(state, copy.getState());

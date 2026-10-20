@@ -118,4 +118,47 @@ public class JGroupsNodeStateTest extends TestSupport {
     }
     assertEquals(s, nodeNamed(c4, "node2").getState());
   }
+
+  @Test
+  public void staleStateNeverOverwritesNewerState() throws Exception {
+    RecordingListener l1 = new RecordingListener();
+    JGroupsCluster c1 = startCluster("node1", l1);
+    JGroupsCluster c2 = startCluster("node2");
+    awaitConverged(c1, c2);
+
+    c2.getLocalNode().setState(state("v", 1));
+    JGroupsNode v1 = snapshot(c2);
+    c2.getLocalNode().setState(state("v", 2));
+    awaitState(c1, "node2", state("v", 2));
+    l1.clear();
+
+    // a delayed copy of the older state (e.g. a re-broadcast or state transfer that lost a race)
+    c1.handleNodeUpdate(
+        new com.github.xgp.cluster.ClusterEvent(
+            null, v1, com.github.xgp.cluster.ClusterEvent.UPDATE_NODE),
+        c2.getChannel().getAddress());
+    assertEquals(state("v", 2), nodeNamed(c1, "node2").getState());
+    assertEquals("no event for a stale update: " + l1, 0, l1.count(UPDATE));
+  }
+
+  @Test
+  public void zoneChangePropagates() throws Exception {
+    JGroupsCluster c1 = startCluster("node1");
+    JGroupsCluster c2 = startCluster("node2");
+    awaitConverged(c1, c2);
+    ((JGroupsLocalNode) c2.getLocalNode()).setZone("dmz");
+    await(
+        "node1 sees node2 in zone dmz", 5000, () -> "dmz".equals(nodeNamed(c1, "node2").getZone()));
+  }
+
+  /** A detached copy of a member's local node as it would travel on the wire, version included. */
+  private static JGroupsNode snapshot(JGroupsCluster c) throws Exception {
+    JGroupsLocalNode local = (JGroupsLocalNode) c.getLocalNode();
+    JGroupsNode plain =
+        new JGroupsNode(
+            local.getName(), ((JGroupsDestination) local.getDestination()).getAddress());
+    plain.setState(local.getState());
+    plain.setVersion(local.getVersion());
+    return JGroupsSerializationTest.roundTrip(plain);
+  }
 }
