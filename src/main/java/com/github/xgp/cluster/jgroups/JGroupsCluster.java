@@ -200,8 +200,16 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
   }
 
   private JChannel createChannel() throws Exception {
-    // Initialize the JGroups channel - try to find the configuration
-    String configFile = jgroupsConfig != null ? jgroupsConfig : DEFAULT_JGROUPS_CONFIG;
+    // A config the caller named explicitly must load as given: silently substituting a
+    // different stack (e.g. UDP for a broken TCP config) would join the wrong cluster.
+    if (jgroupsConfig != null) {
+      JChannel ch = new JChannel(jgroupsConfig);
+      LOG.info("Using JGroups config: " + jgroupsConfig);
+      return ch;
+    }
+
+    // No config named: try the default, then fall back through the bundled configs
+    String configFile = DEFAULT_JGROUPS_CONFIG;
 
     try {
       // Try to find the specified config

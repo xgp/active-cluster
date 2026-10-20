@@ -30,6 +30,24 @@ public class JGroupsLifecycleTest extends TestSupport {
   }
 
   @Test
+  public void startWithUnloadableConfigFailsInsteadOfFallingBack() throws Exception {
+    JGroupsCluster c =
+        (JGroupsCluster)
+            new JGroupsClusterFactory("no-such-config.xml").createCluster("node1", clusterName());
+    try {
+      c.start();
+      c.stop();
+      fail("a named config that cannot be loaded must fail start(), not silently fall back");
+    } catch (ClusterException expected) {
+    }
+    try {
+      c.send(c.getDestination(), new JGroupsMessage("x"));
+      fail("a cluster whose start() failed is not started");
+    } catch (ClusterException expected) {
+    }
+  }
+
+  @Test
   public void stopTwiceIsNoOp() throws Exception {
     JGroupsCluster c = startCluster("node1");
     c.stop();
