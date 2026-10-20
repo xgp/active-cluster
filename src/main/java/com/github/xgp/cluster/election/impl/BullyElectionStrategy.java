@@ -22,8 +22,8 @@ import java.util.Iterator;
 import java.util.Map;
 
 /**
- * <code>BullyElectionStrategy</code> Use a simple bully algorithm to elect a coordinator. the
- * member with the lowest lexicographical name is choosen
+ * <code>BullyElectionStrategy</code> Use a simple bully algorithm to elect a coordinator: the
+ * member with the highest lexicographical name is chosen
  *
  * @version $Revision: 1.2 $
  */

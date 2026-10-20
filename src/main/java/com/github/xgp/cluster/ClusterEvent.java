@@ -117,6 +117,8 @@ public class ClusterEvent implements Externalizable {
       result = "UPDATE_NODE";
     } else if (type == FAILED_NODE) {
       result = "FAILED_NODE";
+    } else if (type == ELECTED_COORDINATOR) {
+      result = "ELECTED_COORDINATOR";
     }
     return result;
   }
