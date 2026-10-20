@@ -302,6 +302,13 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
     try {
       Set<Address> others = new HashSet<>(view.getMembers());
       others.remove(ch.getAddress());
+      synchronized (nodes) {
+        // members that are leaving themselves will not answer
+        others.removeAll(leaving);
+      }
+      if (others.isEmpty()) {
+        return;
+      }
       awaitingLeaveAcks.clear();
       awaitingLeaveAcks.addAll(others);
       CountDownLatch latch = new CountDownLatch(others.size());
@@ -768,18 +775,25 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
         synchronized (nodes) {
           leaving.add(src);
         }
+        // if we are leaving too, do not wait for an answer from a member that is going away
+        releaseLeaveAck(src);
         ch.send(
             new org.jgroups.ObjectMessage(
                 src, new ControlMessage(ControlMessage.Kind.LEAVE_ACK, localNode.getName())));
         break;
       case LEAVE_ACK:
-        CountDownLatch latch = leaveAcks;
-        if (latch != null && awaitingLeaveAcks.remove(src)) {
-          latch.countDown();
-        }
+        releaseLeaveAck(src);
         break;
       default:
         break;
+    }
+  }
+
+  /** Stops {@link #stop()} waiting for {@code member}'s leave acknowledgement. */
+  private void releaseLeaveAck(Address member) {
+    CountDownLatch latch = leaveAcks;
+    if (latch != null && awaitingLeaveAcks.remove(member)) {
+      latch.countDown();
     }
   }
 
@@ -797,16 +811,6 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
     } catch (Exception e) {
       LOG.log(Level.SEVERE, "Error handling view change", e);
     }
-  }
-
-  @Override
-  public void block() {
-    // Called before a possible state transfer - nothing to do
-  }
-
-  @Override
-  public void unblock() {
-    // Called after state transfer is done - nothing to do
   }
 
   /**
@@ -886,6 +890,12 @@ public class JGroupsCluster implements Cluster, Receiver, RequestHandler {
         }
         addRemote(name, addr, info);
         membersAdded = true;
+      }
+
+      for (Address awaited : new ArrayList<>(awaitingLeaveAcks)) {
+        if (!members.contains(awaited)) {
+          releaseLeaveAck(awaited);
+        }
       }
 
       pending.keySet().retainAll(members);
