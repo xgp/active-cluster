@@ -18,14 +18,14 @@ public class JGroupsDestination implements Destination, Serializable {
   private static final long serialVersionUID = -5390829685978935783L;
 
   private final String name;
-  private transient Address address;
+  private transient volatile Address address;
 
   public JGroupsDestination(String name) {
-    this.name = name;
+    this(name, null);
   }
 
   public JGroupsDestination(String name, Address address) {
-    this.name = name;
+    this.name = java.util.Objects.requireNonNull(name, "name");
     this.address = address;
   }
 

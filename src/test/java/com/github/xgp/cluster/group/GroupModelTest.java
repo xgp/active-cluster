@@ -156,4 +156,44 @@ public class GroupModelTest {
     assertEquals(1, g.getMemberCount());
     assertEquals(Arrays.asList(n1), g.getMembers());
   }
+
+  @Test
+  public void groupNeverExceedsMaximumAfterShrinkingAndRegrowing() {
+    GroupModel m = model();
+    Node n1 = node("n1"), n2 = node("n2"), n3 = node("n3");
+    m.addNode(n1);
+    m.addNode(n2);
+    m.addNode(n3);
+    Group g = only(m);
+    m.removeNode(n3);
+    m.removeNode(n2);
+    assertEquals(1, g.getMemberCount());
+
+    for (String n : new String[] {"a", "b", "c", "d"}) {
+      m.addNode(node(n));
+    }
+    for (Object o : m.getGroups()) {
+      Group group = (Group) o;
+      assertTrue(
+          "group has " + group.getMemberCount() + " members, max 3",
+          group.getMemberCount() <= group.getMaximumMemberCount());
+    }
+    assertEquals("five members fill one group of 3 and start another", 2, m.getGroups().size());
+  }
+
+  @Test
+  public void removedNodeIsNotReusedAsABuddy() {
+    BuddyGroupModel m = new BuddyGroupModel();
+    m.setMinimumMemberCount(2);
+    m.setMaximumMemberCount(3);
+    Node n1 = node("n1"), n2 = node("n2"), n3 = node("n3");
+    m.addNode(n1);
+    m.addNode(n2);
+    m.removeNode(n2);
+    m.addNode(n3);
+    for (Object o : m.getGroups()) {
+      assertFalse(
+          "a removed node must not be chosen as a buddy", ((Group) o).getMembers().contains(n2));
+    }
+  }
 }

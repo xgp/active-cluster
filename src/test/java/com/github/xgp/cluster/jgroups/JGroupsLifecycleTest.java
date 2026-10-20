@@ -166,4 +166,96 @@ public class JGroupsLifecycleTest extends TestSupport {
     startCluster("node2");
     await("ADD_NODE(node2) after restart", 10000, () -> l.count(ADD, "node2") == 1);
   }
+
+  @Test
+  public void exceptionsExplainThemselves() throws Exception {
+    JGroupsCluster c = createCluster("node1");
+    try {
+      c.send(c.getDestination(), new JGroupsMessage("x"));
+      fail();
+    } catch (ClusterException e) {
+      assertNotNull("exception has a message", e.getMessage());
+      assertTrue(e.getMessage(), e.getMessage().contains("not started"));
+    }
+    JGroupsCluster bad =
+        (JGroupsCluster)
+            new JGroupsClusterFactory("no-such-config.xml").createCluster("n", clusterName());
+    try {
+      bad.start();
+      fail();
+    } catch (ClusterException e) {
+      assertTrue(e.getMessage(), e.getMessage().contains("no-such-config.xml"));
+      assertNotNull("underlying cause is kept", e.getCause());
+    }
+    c.start();
+    try {
+      c.send(new JGroupsDestination("ghost"), new JGroupsMessage("x"));
+      fail();
+    } catch (ClusterException e) {
+      assertTrue(e.getMessage(), e.getMessage().contains("ghost"));
+    }
+  }
+
+  @Test
+  public void nullArgumentsAreRejected() throws Exception {
+    JGroupsCluster c = startCluster("node1");
+    try {
+      c.send(null, new JGroupsMessage("x"));
+      fail("null destination");
+    } catch (NullPointerException expected) {
+    }
+    try {
+      c.send(c.getDestination(), null);
+      fail("null message");
+    } catch (NullPointerException expected) {
+    }
+    try {
+      c.createConsumer(null);
+      fail("null consumer destination");
+    } catch (NullPointerException expected) {
+    }
+  }
+
+  @Test
+  public void nodeNamesAreValidated() throws Exception {
+    JGroupsClusterFactory f = new JGroupsClusterFactory(config());
+    for (String bad : new String[] {null, "", "same"}) {
+      try {
+        f.createCluster(bad, "same");
+        fail("node name '" + bad + "' must be rejected");
+      } catch (ClusterException expected) {
+      }
+    }
+  }
+
+  @Test
+  public void stateSetBeforeStartIsPublishedOnStart() throws Exception {
+    JGroupsCluster c1 = startCluster("node1");
+    JGroupsCluster c2 = createCluster("node2");
+    Map<String, Object> state = new HashMap<>();
+    state.put("early", true);
+    c2.getLocalNode().setState(state);
+    c2.start();
+    await(
+        "node1 sees node2's early state",
+        5000,
+        () -> nodeNamed(c1, "node2") != null && state.equals(nodeNamed(c1, "node2").getState()));
+  }
+
+  @Test
+  public void aFailingClusterListenerDoesNotStarveOthers() throws Exception {
+    RecordingListener good = new RecordingListener();
+    JGroupsCluster c1 = createCluster("node1");
+    c1.addClusterListener(
+        new RecordingListener() {
+          @Override
+          public void onNodeAdd(com.github.xgp.cluster.ClusterEvent e) {
+            throw new RuntimeException("boom");
+          }
+        });
+    c1.addClusterListener(good);
+    c1.start();
+    startCluster("node2");
+    await("second listener still told about node2", 10000, () -> good.count(ADD, "node2") == 1);
+  }
 }

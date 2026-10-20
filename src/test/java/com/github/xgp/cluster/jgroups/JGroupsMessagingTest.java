@@ -254,4 +254,30 @@ public class JGroupsMessagingTest extends TestSupport {
     assertExactlyOne("kind=a direct", q);
     assertEquals("a", q.list().get(0).getBody(String.class));
   }
+
+  @Test
+  public void invalidSelectorIsRejected() throws Exception {
+    for (String bad : new String[] {"garbage", "=v", "k=", "a=b=c"}) {
+      try {
+        c1.createConsumer(c1.getDestination(), bad);
+        fail("selector '" + bad + "' must be rejected");
+      } catch (ClusterException expected) {
+      }
+    }
+  }
+
+  @Test
+  public void aFailingMessageListenerDoesNotStarveOtherConsumers() throws Exception {
+    c2.createConsumer(c2.getDestination())
+        .setMessageListener(
+            m -> {
+              throw new RuntimeException("boom");
+            });
+    QueueListener good = clusterConsumer(c2);
+    c1.send(c1.getDestination(), new JGroupsMessage("x"));
+    assertExactlyOne("second consumer still receives", good);
+
+    c1.send(c1.getDestination(), new JGroupsMessage("y"));
+    await("and keeps receiving", 5000, () -> good.size() == 2);
+  }
 }

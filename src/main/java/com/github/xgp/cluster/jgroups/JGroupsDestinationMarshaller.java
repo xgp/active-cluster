@@ -20,7 +20,7 @@ public class JGroupsDestinationMarshaller implements DestinationMarshaller {
   @Override
   public Destination getDestination(String destinationName) throws ClusterException {
     if (destinationName == null || destinationName.isEmpty()) {
-      throw new ClusterException();
+      throw new ClusterException("Destination name must not be null or empty");
     }
     return new JGroupsDestination(destinationName);
   }

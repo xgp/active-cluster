@@ -110,8 +110,20 @@ public class JGroupsCluster implements Cluster, Receiver {
    * @param clusterName name of the cluster
    * @param configFile JGroups XML configuration file or classpath resource; null for {@code
    *     minimal.xml}
+   * @throws IllegalArgumentException if either name is null or empty, or if they are equal (node
+   *     and cluster destinations are compared by name, so they must differ)
    */
   public JGroupsCluster(String localNodeName, String clusterName, String configFile) {
+    if (localNodeName == null || localNodeName.isEmpty()) {
+      throw new IllegalArgumentException("node name must not be null or empty");
+    }
+    if (clusterName == null || clusterName.isEmpty()) {
+      throw new IllegalArgumentException("cluster name must not be null or empty");
+    }
+    if (localNodeName.equals(clusterName)) {
+      throw new IllegalArgumentException(
+          "node name must differ from the cluster name '" + clusterName + "'");
+    }
 
     this.clusterName = clusterName;
     this.jgroupsConfig = configFile;
@@ -182,10 +194,19 @@ public class JGroupsCluster implements Cluster, Receiver {
               + ", view: "
               + channel.getView());
     } catch (Exception e) {
-      LOG.log(Level.SEVERE, "Error starting cluster", e);
       started = false;
       closeChannel();
-      throw new ClusterException();
+      String config = jgroupsConfig != null ? jgroupsConfig : DEFAULT_JGROUPS_CONFIG;
+      throw new ClusterException(
+          "Failed to start node '"
+              + localNode.getName()
+              + "' in cluster '"
+              + clusterName
+              + "' with JGroups config '"
+              + config
+              + "': "
+              + e.getMessage(),
+          e);
     }
   }
 
@@ -354,12 +375,14 @@ public class JGroupsCluster implements Cluster, Receiver {
    */
   @Override
   public void send(Destination destination, Message message) throws ClusterException {
+    Objects.requireNonNull(destination, "destination");
+    Objects.requireNonNull(message, "message");
     JChannel ch = channel;
     if (!started || ch == null) {
-      throw new ClusterException();
+      throw notStarted();
     }
     if (!(destination instanceof JGroupsDestination)) {
-      throw new ClusterException();
+      throw new ClusterException("Not a JGroups destination: " + destination);
     }
 
     Address target = null; // null = multicast
@@ -371,8 +394,7 @@ public class JGroupsCluster implements Cluster, Receiver {
       LOG.fine("Sending message to " + (target == null ? "the cluster" : destination));
       ch.send(new org.jgroups.ObjectMessage(target, message));
     } catch (Exception e) {
-      LOG.log(Level.WARNING, "Error sending message to " + destination, e);
-      throw new ClusterException();
+      throw new ClusterException("Failed to send to " + destination + ": " + e.getMessage(), e);
     }
   }
 
@@ -383,8 +405,8 @@ public class JGroupsCluster implements Cluster, Receiver {
       Address addr =
           node == null ? null : ((JGroupsDestination) node.getDestination()).getAddress();
       if (addr == null) {
-        LOG.fine("No current member named " + dest.getName());
-        throw new ClusterException();
+        throw new ClusterException(
+            "No current member named '" + dest.getName() + "' in cluster '" + clusterName + "'");
       }
       return addr;
     }
@@ -404,18 +426,19 @@ public class JGroupsCluster implements Cluster, Receiver {
   @Override
   public MessageConsumer createConsumer(Destination destination, String selector, boolean noLocal)
       throws ClusterException {
-
+    Objects.requireNonNull(destination, "destination");
     if (!started) {
-      throw new ClusterException();
+      throw notStarted();
     }
-
     if (!(destination instanceof JGroupsDestination)) {
-      throw new ClusterException();
+      throw new ClusterException("Not a JGroups destination: " + destination);
     }
-
-    JGroupsDestination jgDest = (JGroupsDestination) destination;
-    JGroupsMessageConsumer consumer = new JGroupsMessageConsumer(this, jgDest, selector, noLocal);
-    return consumer;
+    try {
+      JGroupsMessageConsumer.validateSelector(selector);
+    } catch (IllegalArgumentException e) {
+      throw new ClusterException(e.getMessage(), e);
+    }
+    return new JGroupsMessageConsumer(this, (JGroupsDestination) destination, selector, noLocal);
   }
 
   /**
@@ -439,13 +462,14 @@ public class JGroupsCluster implements Cluster, Receiver {
   }
 
   /**
-   * Broadcast the local node's state to the other members. A detached copy is sent, never the local
-   * node itself, so receivers only ever hold plain {@link JGroupsNode}s for remote members.
+   * Broadcast the local node's state to the other members; a no-op until started. A detached copy
+   * is sent, never the local node itself, so receivers only ever hold plain {@link JGroupsNode}s
+   * for remote members.
    */
   void broadcastNodeState() throws Exception {
     JChannel ch = channel;
-    if (!started || ch == null) {
-      throw new ClusterException();
+    if (!started || ch == null || !ch.isConnected()) {
+      return; // start() publishes the current state once connected
     }
 
     JGroupsDestination dest = localDestination();
@@ -699,6 +723,11 @@ public class JGroupsCluster implements Cluster, Receiver {
       default:
         break;
     }
+  }
+
+  private ClusterException notStarted() {
+    return new ClusterException(
+        "Cluster member '" + localNode.getName() + "' is not started; call start() first");
   }
 
   /** Stops {@link #stop()} waiting for {@code member}'s leave acknowledgement. */

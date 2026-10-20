@@ -82,6 +82,9 @@ public class GroupModel {
         updateGroupCollections(group, wasFull, wasUsable);
       }
     }
+
+    // forget the node entirely so it is never picked as a buddy again
+    nodeMemberships.remove(node);
   }
 
   // Properties
@@ -202,19 +205,18 @@ public class GroupModel {
   }
 
   /**
-   * Lets move the group from its current state collection to the new collection if its state has
-   * changed
+   * Re-files the group under the one collection matching its current size (full, complete or
+   * incomplete). Recomputed rather than diffed so a group can never be listed twice.
    */
   protected void updateGroupCollections(Group group, boolean wasFull, boolean wasUsable) {
-    boolean full = group.isFull();
-    if (wasFull && !full) {
-      fullGroups.remove(group);
-    }
-    boolean usable = group.isUsable();
-    if (wasUsable && !usable) {
-      completeGroups.remove(group);
-    }
-    if ((!usable || !full) && (wasFull || wasUsable)) {
+    fullGroups.remove(group);
+    completeGroups.remove(group);
+    incompleteGroups.remove(group);
+    if (group.isFull()) {
+      fullGroups.add(group);
+    } else if (group.isUsable()) {
+      completeGroups.add(group);
+    } else {
       incompleteGroups.add(group);
     }
   }

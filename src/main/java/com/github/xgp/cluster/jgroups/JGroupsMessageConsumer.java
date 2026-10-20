@@ -6,40 +6,81 @@ import com.github.xgp.cluster.MessageListener;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
- * JGroups implementation of the MessageConsumer interface.
+ * Receives messages for one destination: the cluster destination (broadcasts) or the local node's
+ * destination (direct messages). Messages are handed to the {@link MessageListener} if one is set,
+ * otherwise queued for {@link #receive}.
  *
- * @version $Revision: 1.0 $
+ * <p>The optional selector is a single property equality, {@code key='value'} or {@code key=value};
+ * it matches messages whose property {@code key} has the string form {@code value}.
  */
 public class JGroupsMessageConsumer implements MessageConsumer {
+
+  private static final Logger LOG = Logger.getLogger(JGroupsMessageConsumer.class.getName());
 
   private final JGroupsCluster cluster;
   private final JGroupsDestination destination;
   private final String selector;
+  private final String selectorKey;
+  private final String selectorValue;
   private final boolean noLocal;
   private final BlockingQueue<Message> messageQueue = new LinkedBlockingQueue<>();
 
-  private MessageListener messageListener;
-  private boolean closed = false;
+  private volatile MessageListener messageListener;
+  private volatile boolean closed = false;
 
+  /**
+   * @throws IllegalArgumentException if the selector is not of the form {@code key=value}
+   */
   public JGroupsMessageConsumer(
       JGroupsCluster cluster, JGroupsDestination destination, String selector, boolean noLocal) {
+    String[] parsed = validateSelector(selector);
     this.cluster = cluster;
     this.destination = destination;
     this.selector = selector;
+    this.selectorKey = parsed == null ? null : parsed[0];
+    this.selectorValue = parsed == null ? null : parsed[1];
     this.noLocal = noLocal;
 
     cluster.registerConsumer(this);
   }
 
+  /**
+   * Parses a selector into {@code [key, value]}, or returns null for a null selector.
+   *
+   * @throws IllegalArgumentException if the selector is not of the form {@code key=value}
+   */
+  static String[] validateSelector(String selector) {
+    if (selector == null) {
+      return null;
+    }
+    String[] parts = selector.split("=", -1);
+    if (parts.length != 2) {
+      throw new IllegalArgumentException(
+          "Unsupported selector '" + selector + "': expected key='value'");
+    }
+    String key = parts[0].trim();
+    String value = parts[1].trim();
+    if (value.length() >= 2 && value.startsWith("'") && value.endsWith("'")) {
+      value = value.substring(1, value.length() - 1);
+    }
+    if (key.isEmpty() || value.isEmpty()) {
+      throw new IllegalArgumentException(
+          "Unsupported selector '" + selector + "': expected key='value'");
+    }
+    return new String[] {key, value};
+  }
+
   @Override
-  public MessageListener getMessageListener() throws Exception {
+  public MessageListener getMessageListener() {
     return messageListener;
   }
 
   @Override
-  public void setMessageListener(MessageListener listener) throws Exception {
+  public void setMessageListener(MessageListener listener) {
     this.messageListener = listener;
   }
 
@@ -62,7 +103,7 @@ public class JGroupsMessageConsumer implements MessageConsumer {
   }
 
   @Override
-  public void close() throws Exception {
+  public void close() {
     if (!closed) {
       closed = true;
       cluster.unregisterConsumer(this);
@@ -82,50 +123,37 @@ public class JGroupsMessageConsumer implements MessageConsumer {
   }
 
   /**
-   * Called when a message is received from JGroups that matches this consumer's criteria.
-   *
-   * @param message the received message
+   * Delivers a message to the listener, or queues it. A listener that throws is logged and does not
+   * affect delivery to other consumers.
    */
   public void onMessage(Message message) {
     if (closed) {
       return;
     }
 
-    if (messageListener != null) {
-      messageListener.onMessage(message);
+    MessageListener listener = messageListener;
+    if (listener != null) {
+      try {
+        listener.onMessage(message);
+      } catch (RuntimeException e) {
+        LOG.log(Level.WARNING, "Message listener on " + destination + " failed", e);
+      }
     } else {
       messageQueue.offer(message);
     }
   }
 
-  private void checkClosed() throws Exception {
+  private void checkClosed() throws IllegalStateException {
     if (closed) {
-      throw new Exception("Consumer is closed");
+      throw new IllegalStateException("Consumer is closed");
     }
   }
 
-  /**
-   * Checks if this message matches the selector criteria.
-   *
-   * @param message the message to check
-   * @return true if the message passes the selector, false otherwise
-   */
   public boolean matchesSelector(Message message) {
-    // Simple selector implementation - could be enhanced to use SQL92 syntax
-    if (selector == null) {
+    if (selectorKey == null) {
       return true;
     }
-
-    // Example: Simple property matching
-    String[] parts = selector.split("=");
-    if (parts.length == 2) {
-      String key = parts[0].trim();
-      String value = parts[1].trim().replace("'", "");
-
-      Object propValue = message.getProperty(key);
-      return propValue != null && propValue.toString().equals(value);
-    }
-
-    return true;
+    Object propValue = message.getProperty(selectorKey);
+    return propValue != null && propValue.toString().equals(selectorValue);
   }
 }

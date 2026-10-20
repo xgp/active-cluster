@@ -2,14 +2,13 @@ package com.github.xgp.cluster.jgroups;
 
 import com.github.xgp.cluster.ClusterException;
 import com.github.xgp.cluster.LocalNode;
-import java.util.HashMap;
 import java.util.Map;
 import org.jgroups.Address;
 
 /**
- * JGroups implementation of the LocalNode interface.
- *
- * @version $Revision: 1.0 $
+ * The member running in this process. {@link #setState} replaces the state and publishes it to the
+ * other members asynchronously; state set before {@link JGroupsCluster#start()} is published when
+ * the cluster starts.
  */
 public class JGroupsLocalNode extends JGroupsNode implements LocalNode {
 
@@ -34,23 +33,24 @@ public class JGroupsLocalNode extends JGroupsNode implements LocalNode {
     this.cluster = cluster;
   }
 
+  /**
+   * Replaces this member's state (the map is copied) and publishes it to the cluster.
+   *
+   * @throws ClusterException if this node does not belong to a cluster, or publishing fails
+   */
   @Override
   public void setState(Map<String, Object> state) throws ClusterException {
     if (cluster == null) {
-      throw new ClusterException();
+      throw new ClusterException("Local node '" + getName() + "' is not attached to a cluster");
     }
 
-    Map<String, Object> copy = new HashMap<>();
-    if (state != null) {
-      copy.putAll(state);
-    }
-
-    super.setState(copy);
+    super.setState(state);
 
     try {
       cluster.broadcastNodeState();
     } catch (Exception e) {
-      throw new ClusterException();
+      throw new ClusterException(
+          "Failed to publish state of '" + getName() + "': " + e.getMessage(), e);
     }
   }
 }

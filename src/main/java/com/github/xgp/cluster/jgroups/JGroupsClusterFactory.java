@@ -22,24 +22,24 @@ import com.github.xgp.cluster.DestinationMarshaller;
 import java.util.UUID;
 
 /**
- * JGroups implementation of the ClusterFactory interface.
- *
- * @version $Revision: 1.0 $
+ * Creates {@link JGroupsCluster} members that all use the same JGroups stack. The stack is an XML
+ * file path or classpath resource; with none given, {@code minimal.xml} (UDP multicast) is used.
+ * Clusters are created unstarted: add listeners, then call {@link Cluster#start()}.
  */
 public class JGroupsClusterFactory implements ClusterFactory {
 
-  private String jgroupsConfig;
-  private JGroupsDestinationMarshaller marshaller;
+  private final String jgroupsConfig;
+  private final JGroupsDestinationMarshaller marshaller;
 
-  /** Create a new factory with default configuration. */
+  /** Create a new factory with the default stack, {@code minimal.xml}. */
   public JGroupsClusterFactory() {
     this(null, null);
   }
 
   /**
-   * Create a new factory with the given JGroups configuration file.
+   * Create a new factory with the given JGroups configuration.
    *
-   * @param jgroupsConfig path to JGroups XML configuration file
+   * @param jgroupsConfig JGroups XML file path or classpath resource, or null for the default
    */
   public JGroupsClusterFactory(String jgroupsConfig) {
     this(jgroupsConfig, null);
@@ -48,83 +48,70 @@ public class JGroupsClusterFactory implements ClusterFactory {
   /**
    * Create a new factory with the given JGroups configuration and marshaller.
    *
-   * @param jgroupsConfig path to JGroups XML configuration file
-   * @param marshaller custom destination marshaller or null for default
+   * @param jgroupsConfig JGroups XML file path or classpath resource, or null for the default
+   * @param marshaller destination marshaller, or null for the default
    */
   public JGroupsClusterFactory(String jgroupsConfig, JGroupsDestinationMarshaller marshaller) {
     this.jgroupsConfig = jgroupsConfig;
     this.marshaller = marshaller != null ? marshaller : new JGroupsDestinationMarshaller();
   }
 
+  /**
+   * @throws ClusterException if a name is null or empty, or the node name equals the cluster name
+   */
   @Override
   public Cluster createCluster(String localName, String destinationName) throws ClusterException {
-    JGroupsCluster cluster = new JGroupsCluster(localName, destinationName, jgroupsConfig);
-    return cluster;
+    try {
+      return new JGroupsCluster(localName, destinationName, jgroupsConfig);
+    } catch (IllegalArgumentException e) {
+      throw new ClusterException(e.getMessage(), e);
+    }
   }
 
   @Override
   public Cluster createCluster(
       String localName, String destinationName, DestinationMarshaller marshaller)
       throws ClusterException {
-    if (!(marshaller instanceof JGroupsDestinationMarshaller)) {
-      throw new ClusterException();
-    }
-
-    JGroupsCluster cluster = new JGroupsCluster(localName, destinationName, jgroupsConfig);
-
-    return cluster;
+    requireJGroups(marshaller);
+    return createCluster(localName, destinationName);
   }
 
+  /** Creates a member named {@code node-<random UUID>}. */
   @Override
   public Cluster createCluster(String destinationName) throws ClusterException {
-    // Generate a unique local node name
-    String localName = "node-" + UUID.randomUUID().toString();
-    return createCluster(localName, destinationName);
+    return createCluster("node-" + UUID.randomUUID(), destinationName);
   }
 
   @Override
   public Cluster createCluster(String localName, Destination destination) throws ClusterException {
-    if (!(destination instanceof JGroupsDestination)) {
-      throw new ClusterException();
-    }
-
-    String destName = marshaller.getDestinationName(destination);
-    if (destName == null) {
-      throw new ClusterException();
-    }
-
-    return createCluster(localName, destName);
+    return createCluster(localName, nameOf(destination, marshaller));
   }
 
   @Override
   public Cluster createCluster(
       String localName, Destination destination, DestinationMarshaller marshaller)
       throws ClusterException {
-
-    if (!(destination instanceof JGroupsDestination)
-        || !(marshaller instanceof JGroupsDestinationMarshaller)) {
-      throw new ClusterException();
-    }
-
-    String destName = marshaller.getDestinationName(destination);
-    if (destName == null) {
-      throw new ClusterException();
-    }
-
-    return createCluster(localName, destName, marshaller);
+    requireJGroups(marshaller);
+    return createCluster(localName, nameOf(destination, marshaller));
   }
 
   @Override
   public Cluster createCluster(Destination destination) throws ClusterException {
-    if (!(destination instanceof JGroupsDestination)) {
-      throw new ClusterException();
-    }
+    return createCluster(nameOf(destination, marshaller));
+  }
 
-    String destName = marshaller.getDestinationName(destination);
-    if (destName == null) {
-      throw new ClusterException();
+  private static void requireJGroups(DestinationMarshaller marshaller) throws ClusterException {
+    if (!(marshaller instanceof JGroupsDestinationMarshaller)) {
+      throw new ClusterException("Not a JGroups destination marshaller: " + marshaller);
     }
+  }
 
-    return createCluster(destName);
+  private static String nameOf(Destination destination, DestinationMarshaller marshaller)
+      throws ClusterException {
+    String name = marshaller.getDestinationName(destination);
+    if (name == null) {
+      throw new ClusterException("Not a JGroups destination: " + destination);
+    }
+    return name;
   }
 }
